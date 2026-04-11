@@ -75,6 +75,9 @@ export const restoreRecycleFile = (fileId) => request.put(`/file/recycle/restore
 // 回收站彻底删除
 export const purgeRecycleFile = (fileId) => request.delete(`/file/recycle/purge/${fileId}`);
 
+// 回收站一键清空
+export const purgeAllRecycleFiles = () => request.delete('/file/recycle/purge-all');
+
 // 新建文件夹
 export const createFolder = (folderName, parentId) =>
   request.post('/file/folder', null, { params: { folderName, parentId } });

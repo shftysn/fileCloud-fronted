@@ -36,6 +36,7 @@ import {
     listRecycleFiles,
     restoreRecycleFile,
     purgeRecycleFile,
+    purgeAllRecycleFiles,
     listMyShareLinks,
     revokeShareLink,
 } from '../api/file';
@@ -279,6 +280,21 @@ export default function FilesPage() {
             }
         } catch (err) {
             message.error(err.response?.data?.message || '彻底删除失败');
+        }
+    };
+
+    const handlePurgeAllRecycle = async () => {
+        try {
+            const { data } = await purgeAllRecycleFiles();
+            if (data.code === 200) {
+                message.success(data.message || '回收站已清空');
+                setRecycleFiles([]);
+                refreshCurrentView({ silent: true });
+            } else {
+                message.error(data.message || '清空回收站失败');
+            }
+        } catch (err) {
+            message.error(err.response?.data?.message || '清空回收站失败');
         }
     };
 
@@ -825,6 +841,18 @@ export default function FilesPage() {
                             <Button icon={<FolderAddOutlined />} onClick={() => setFolderModalOpen(true)}>
                                 新建文件夹
                             </Button>
+                        )}
+                        {activeView === VIEW_RECYCLE && (
+                            <Popconfirm
+                                title="确认一键清空回收站？该操作不可恢复"
+                                onConfirm={handlePurgeAllRecycle}
+                                okText="确认清空"
+                                cancelText="取消"
+                            >
+                                <Button danger icon={<DeleteFilled />} disabled={recycleFiles.length === 0}>
+                                    一键全部删除
+                                </Button>
+                            </Popconfirm>
                         )}
                         <Button icon={<ReloadOutlined />} onClick={refreshCurrentView}>刷新</Button>
                     </div>
