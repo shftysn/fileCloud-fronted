@@ -1,4 +1,4 @@
-import request from '../utils/request';
+import request, { resolveApiUrl } from '../utils/request';
 import axios from 'axios';
 
 // 登录
@@ -14,7 +14,7 @@ export const sendEmailCode = (data) => request.post('/auth/email-code/send', dat
 export const resetPasswordByEmailCode = (data) => request.post('/auth/password/reset', data);
 
 // 刷新 token
-export const refreshToken = () => axios.post('/api/auth/refresh', null, { withCredentials: true });
+export const refreshToken = () => axios.post(resolveApiUrl('/auth/refresh'), null, { withCredentials: true });
 
 // 当前登录用户信息
 export const getCurrentUser = () => request.get('/auth/me');
@@ -23,7 +23,7 @@ export const getCurrentUser = () => request.get('/auth/me');
 export const logout = () => request.post('/auth/logout');
 
 // GitHub OAuth 发起地址
-export const githubAuthorizeUrl = '/api/auth/oauth/github/authorize';
+export const githubAuthorizeUrl = resolveApiUrl('/auth/oauth/github/authorize');
 
 // GitHub OAuth ticket 兑换
 export const exchangeGithubTicket = (ticket) => request.post('/auth/oauth/github/exchange', { ticket });

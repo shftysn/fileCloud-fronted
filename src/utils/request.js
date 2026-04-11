@@ -2,8 +2,44 @@ import axios from 'axios';
 import store from '../store';
 import { clearAuth, setAccessToken } from '../store/authSlice';
 
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+
+export const resolveApiUrl = (url) => {
+  if (!url) return url;
+  if (/^https?:\/\//i.test(url)) return url;
+
+  const raw = String(API_BASE_URL || '/api').trim();
+  if (/^https?:\/\//i.test(raw)) {
+    const parsed = new URL(raw);
+    const basePath = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : '';
+    if (url.startsWith('/api/')) {
+      return `${parsed.origin}${url}`;
+    }
+    if (url === '/api') {
+      return `${parsed.origin}/api`;
+    }
+    if (url.startsWith('/')) {
+      return `${parsed.origin}${basePath}${url}`;
+    }
+    return `${parsed.origin}${basePath}/${url}`;
+  }
+
+  const normalizedBase = raw.startsWith('/') ? raw : `/${raw}`;
+  const basePath = normalizedBase.replace(/\/+$/, '');
+  if (url.startsWith('/api/')) {
+    return `${window.location.origin}${url}`;
+  }
+  if (url === '/api') {
+    return `${window.location.origin}/api`;
+  }
+  if (url.startsWith('/')) {
+    return `${window.location.origin}${basePath}${url}`;
+  }
+  return `${window.location.origin}${basePath}/${url}`;
+};
+
 const request = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: API_BASE_URL,
   timeout: 60000,
   withCredentials: true,
 });
@@ -65,7 +101,7 @@ request.interceptors.response.use(
       isRefreshing = true;
       try {
         // 刷新请求使用原始 axios，绕开当前实例拦截器，避免拦截器递归触发。
-        const { data } = await axios.post('/api/auth/refresh', null, {
+        const { data } = await axios.post(resolveApiUrl('/auth/refresh'), null, {
           withCredentials: true,
           timeout: 60000,
         });
