@@ -117,8 +117,11 @@ export default function FilesPage() {
         return fallbackName || 'download';
     };
 
-    const fetchFiles = async () => {
-        setLoading(true);
+    const fetchFiles = async (options = {}) => {
+        const silent = options.silent === true;
+        if (!silent) {
+            setLoading(true);
+        }
         try {
             const { data } = await listFiles({ parentId, keyword: keyword || undefined });
             if (data.code === 200) {
@@ -127,12 +130,17 @@ export default function FilesPage() {
         } catch {
             message.error('获取文件列表失败');
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
     };
 
-    const fetchFavoriteFiles = async () => {
-        setLoading(true);
+    const fetchFavoriteFiles = async (options = {}) => {
+        const silent = options.silent === true;
+        if (!silent) {
+            setLoading(true);
+        }
         try {
             const { data } = await listFavoriteFiles();
             if (data.code === 200) {
@@ -141,12 +149,17 @@ export default function FilesPage() {
         } catch {
             message.error('获取收藏列表失败');
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
     };
 
-    const fetchRecycleFiles = async () => {
-        setLoading(true);
+    const fetchRecycleFiles = async (options = {}) => {
+        const silent = options.silent === true;
+        if (!silent) {
+            setLoading(true);
+        }
         try {
             const { data } = await listRecycleFiles();
             if (data.code === 200) {
@@ -155,12 +168,17 @@ export default function FilesPage() {
         } catch {
             message.error('获取回收站失败');
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
     };
 
-    const fetchShareRecords = async () => {
-        setLoading(true);
+    const fetchShareRecords = async (options = {}) => {
+        const silent = options.silent === true;
+        if (!silent) {
+            setLoading(true);
+        }
         try {
             const { data } = await listMyShareLinks();
             if (data.code === 200) {
@@ -169,24 +187,26 @@ export default function FilesPage() {
         } catch {
             message.error('获取分享管理列表失败');
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
     };
 
-    const refreshCurrentView = async () => {
+    const refreshCurrentView = async (options = {}) => {
         if (activeView === VIEW_FILES) {
-            await fetchFiles();
+            await fetchFiles(options);
             return;
         }
         if (activeView === VIEW_FAVORITES) {
-            await fetchFavoriteFiles();
+            await fetchFavoriteFiles(options);
             return;
         }
         if (activeView === VIEW_RECYCLE) {
-            await fetchRecycleFiles();
+            await fetchRecycleFiles(options);
             return;
         }
-        await fetchShareRecords();
+        await fetchShareRecords(options);
     };
 
     useEffect(() => {
@@ -225,7 +245,9 @@ export default function FilesPage() {
             const { data } = await deleteFile(fileId);
             if (data.code === 200) {
                 message.success('已移入回收站');
-                refreshCurrentView();
+                setFiles((prev) => prev.filter((item) => item.id !== fileId));
+                setFavoriteFiles((prev) => prev.filter((item) => item.id !== fileId));
+                refreshCurrentView({ silent: true });
             }
         } catch {
             message.error('删除失败');
