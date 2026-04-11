@@ -3,7 +3,7 @@ import store from '../store';
 import { clearAuth, setAccessToken } from '../store/authSlice';
 
 const request = axios.create({
-  baseURL: import.meta.env.VITE-API-BASE-URL || '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   timeout: 60000,
   withCredentials: true,
 });
