@@ -30,6 +30,7 @@ import {
     getPublicShareDownloadUrl,
     getFolderTree,
     createPreviewTicket,
+    resolveApiUrl,
     listFavoriteFiles,
     setFavoriteFile,
     listRecycleFiles,
@@ -356,7 +357,7 @@ export default function FilesPage() {
                 return;
             }
 
-            const url = data.data.previewUrl;
+            const url = resolveApiUrl(data.data.previewUrl);
             if (isImagePreviewable(record.contentType)) {
                 setPreviewKind('image');
                 setPreviewUrl(url);

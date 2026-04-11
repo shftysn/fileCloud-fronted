@@ -1,5 +1,40 @@
 import request from '../utils/request';
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+
+const getApiBaseInfo = () => {
+  const raw = String(API_BASE_URL || '/api').trim();
+  if (/^https?:\/\//i.test(raw)) {
+    const parsed = new URL(raw);
+    const basePath = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : '';
+    return { origin: parsed.origin, basePath };
+  }
+
+  const normalizedPath = raw.startsWith('/') ? raw : `/${raw}`;
+  return {
+    origin: window.location.origin,
+    basePath: normalizedPath.replace(/\/+$/, ''),
+  };
+};
+
+export const resolveApiUrl = (url) => {
+  if (!url) return url;
+  if (/^https?:\/\//i.test(url)) return url;
+
+  const { origin, basePath } = getApiBaseInfo();
+  if (url.startsWith('/api/')) {
+    return `${origin}${url}`;
+  }
+  if (url === '/api') {
+    return `${origin}/api`;
+  }
+  if (url.startsWith('/')) {
+    return `${origin}${basePath}${url}`;
+  }
+
+  return `${origin}${basePath}/${url}`;
+};
+
 // 初始化上传
 export const initUpload = (data) => request.post('/file/upload/init', data);
 
@@ -26,7 +61,7 @@ export const listFiles = (params) => request.get('/file/list', { params });
 export const getFolderTree = () => request.get('/file/folders/tree');
 
 // 下载（返回 URL，由浏览器直接请求）
-export const getDownloadUrl = (fileId) => `/api/file/download/${fileId}`;
+export const getDownloadUrl = (fileId) => resolveApiUrl(`/api/file/download/${fileId}`);
 
 // 删除文件
 export const deleteFile = (fileId) => request.delete(`/file/${fileId}`);
@@ -59,7 +94,7 @@ export const listMyShareLinks = () => request.get('/file/share/my');
 export const revokeShareLink = (shareId) => request.delete(`/file/share/${shareId}`);
 
 // 分享下载URL（公开）
-export const getPublicShareDownloadUrl = (token) => `/api/file/share/public/download/${token}`;
+export const getPublicShareDownloadUrl = (token) => resolveApiUrl(`/api/file/share/public/download/${token}`);
 
 // 生成预览票据
 export const createPreviewTicket = (fileId) => request.post(`/file/preview-ticket/${fileId}`);
