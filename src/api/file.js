@@ -51,6 +51,9 @@ export const uploadChunk = (uploadId, chunkIndex, file, onProgress) => {
 // 合并分片
 export const mergeChunks = (uploadId) => request.post(`/file/upload/merge?uploadId=${uploadId}`);
 
+// 查询合并任务状态
+export const getMergeStatus = (uploadId) => request.get('/file/upload/merge/status', { params: { uploadId } });
+
 // 取消上传并清理分片
 export const cancelUploadSession = (uploadId) => request.post(`/file/upload/cancel?uploadId=${uploadId}`);
 
@@ -77,6 +80,10 @@ export const purgeRecycleFile = (fileId) => request.delete(`/file/recycle/purge/
 
 // 回收站一键清空
 export const purgeAllRecycleFiles = () => request.delete('/file/recycle/purge-all');
+
+// 查询回收站一键清空任务状态
+export const getPurgeAllRecycleStatus = (taskId) =>
+  request.get('/file/recycle/purge-all/status', { params: { taskId } });
 
 // 新建文件夹
 export const createFolder = (folderName, parentId) =>

@@ -2,11 +2,13 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { Button, Progress, Typography, message, Space, Tag, Card, Alert, List } from 'antd';
 import { UploadOutlined, InboxOutlined, ReloadOutlined, DeleteOutlined, PauseOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
-import { initUpload, uploadChunk, mergeChunks, cancelUploadSession } from '../api/file';
+import { initUpload, uploadChunk, mergeChunks, getMergeStatus, cancelUploadSession } from '../api/file';
 import store from '../store';
 import { addTasks, patchTask, removeTaskById, clearDoneTasks as clearDoneTasksAction, setUploadingAll } from '../store/uploadSlice';
 
 const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB，与后端保持一致
+const MERGE_POLL_INTERVAL_MS = 1500;
+const MERGE_POLL_MAX_ROUNDS = 240;
 
 export default function UploadPage() {
     const dispatch = useDispatch();
@@ -63,6 +65,32 @@ export default function UploadPage() {
             finishedCleanupTimersRef.current.delete(taskId);
         }, delayMs);
         finishedCleanupTimersRef.current.set(taskId, timerId);
+    };
+
+    const sleep = (ms) => new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+    });
+
+    const waitMergeCompleted = async (uploadId) => {
+        for (let i = 0; i < MERGE_POLL_MAX_ROUNDS; i++) {
+            const { data } = await getMergeStatus(uploadId);
+            if (data.code !== 200) {
+                throw new Error(data.message || '查询合并状态失败');
+            }
+
+            const task = data.data || {};
+            if (task.status === 'success') {
+                return;
+            }
+            if (task.status === 'failed') {
+                throw new Error(task.message || '合并失败');
+            }
+            if (task.status === 'not_found') {
+                throw new Error(task.message || '合并任务不存在');
+            }
+            await sleep(MERGE_POLL_INTERVAL_MS);
+        }
+        throw new Error('合并超时，请稍后刷新文件列表确认');
     };
 
 
@@ -200,6 +228,7 @@ export default function UploadPage() {
             updateTask(task.id, { status: 'merging' });
             const { data: mergeRes } = await mergeChunks(uploadId);
             if (mergeRes.code === 200) {
+                await waitMergeCompleted(uploadId);
                 updateTask(task.id, {
                     status: 'done',
                     progress: 100,
@@ -212,8 +241,8 @@ export default function UploadPage() {
             } else {
                 updateTask(task.id, { status: 'error', errorMessage: mergeRes.message || '合并失败' });
             }
-        } catch {
-            updateTask(task.id, { status: 'error', errorMessage: '上传过程出错' });
+        } catch (err) {
+            updateTask(task.id, { status: 'error', errorMessage: err?.message || '上传过程出错' });
         } finally {
             runningTaskIdsRef.current.delete(task.id);
         }

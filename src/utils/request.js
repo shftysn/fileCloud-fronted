@@ -1,17 +1,31 @@
 import axios from 'axios';
 import store from '../store';
 import { clearAuth, setAccessToken } from '../store/authSlice';
-
+//VITE_API_BASE_URL=https://api.huakaiwuqu.me/api
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
+
+// 解析 API URL，支持绝对 URL 和相对 URL（基于 API_BASE_URL 或当前 origin）
 export const resolveApiUrl = (url) => {
+  // 如果 URL 为空或非字符串，直接返回原值，避免后续处理出错。
   if (!url) return url;
+
+  // 检测 URL 是否以 http 或 https 开头
   if (/^https?:\/\//i.test(url)) return url;
 
+  // 处理 API_BASE_URL，确保它是一个字符串，并去除首尾空白。
   const raw = String(API_BASE_URL || '/api').trim();
+
+  // 绝对 URL 直接拼接路径部分，确保正确处理 basePath 和 url 的斜杠。
   if (/^https?:\/\//i.test(raw)) {
+
+    // 解析出 basePath，确保在拼接时不会出现重复斜杠。
     const parsed = new URL(raw);
+
+    // 处理 basePath，去除末尾斜杠，确保拼接时路径正确。
     const basePath = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : '';
+    
+    //以/api开头的直接添加到origin后面，不以/api开头的在VITE_API_BASE_URL后面添加url，最后返回完整的URL
     if (url.startsWith('/api/')) {
       return `${parsed.origin}${url}`;
     }
@@ -25,8 +39,11 @@ export const resolveApiUrl = (url) => {
   }
 
   const normalizedBase = raw.startsWith('/') ? raw : `/${raw}`;
+
+  // 处理 basePath，去除末尾斜杠，确保拼接时路径正确。
   const basePath = normalizedBase.replace(/\/+$/, '');
   if (url.startsWith('/api/')) {
+    //window.location.origin:当前页面的“源”（协议 + 域名 + 端口）
     return `${window.location.origin}${url}`;
   }
   if (url === '/api') {

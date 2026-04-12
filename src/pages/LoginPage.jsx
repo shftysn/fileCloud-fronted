@@ -51,7 +51,7 @@ export default function LoginPage() {
         <div className="ol-auth-grid">
           <div className="ol-auth-hero">
             <div className="ol-auth-badge">
-              <CloudServerOutlined /> OpenList Style
+              {/* <CloudServerOutlined /> OpenList Style */}
             </div>
             <Typography.Title level={2}>分布式网盘</Typography.Title>
             <Typography.Paragraph>

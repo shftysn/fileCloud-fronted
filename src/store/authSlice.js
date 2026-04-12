@@ -35,6 +35,7 @@ function clearPersistedAuth() {
     }
 }
 
+// 从本地存储加载持久化的认证状态，初始化 Redux 中的 auth slice。
 const persisted = loadPersistedAuth();
 
 const initialState = {

@@ -37,6 +37,7 @@ import {
     restoreRecycleFile,
     purgeRecycleFile,
     purgeAllRecycleFiles,
+    getPurgeAllRecycleStatus,
     listMyShareLinks,
     revokeShareLink,
 } from '../api/file';
@@ -47,6 +48,8 @@ const VIEW_FILES = 'files';
 const VIEW_FAVORITES = 'favorites';
 const VIEW_RECYCLE = 'recycle';
 const VIEW_SHARES = 'shares';
+const PURGE_POLL_INTERVAL_MS = 1200;
+const PURGE_POLL_MAX_ROUNDS = 180;
 
 export default function FilesPage() {
     const location = useLocation();
@@ -116,6 +119,32 @@ export default function FilesPage() {
             return basicMatch[1];
         }
         return fallbackName || 'download';
+    };
+
+    const sleep = (ms) => new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+    });
+
+    const waitPurgeAllCompleted = async (taskId) => {
+        for (let i = 0; i < PURGE_POLL_MAX_ROUNDS; i++) {
+            const { data } = await getPurgeAllRecycleStatus(taskId);
+            if (data.code !== 200) {
+                throw new Error(data.message || '查询清空回收站状态失败');
+            }
+
+            const task = data.data || {};
+            if (task.status === 'success') {
+                return;
+            }
+            if (task.status === 'failed') {
+                throw new Error(task.message || '清空回收站失败');
+            }
+            if (task.status === 'not_found') {
+                throw new Error(task.message || '任务不存在或无权限');
+            }
+            await sleep(PURGE_POLL_INTERVAL_MS);
+        }
+        throw new Error('清空回收站超时，请稍后刷新再试');
     };
 
     const fetchFiles = async (options = {}) => {
@@ -287,14 +316,20 @@ export default function FilesPage() {
         try {
             const { data } = await purgeAllRecycleFiles();
             if (data.code === 200) {
-                message.success(data.message || '回收站已清空');
+                const taskId = data.data?.taskId;
+                if (!taskId) {
+                    throw new Error('未获取到清理任务ID');
+                }
+                message.info('已提交清空任务，正在后台处理');
+                await waitPurgeAllCompleted(taskId);
+                message.success('回收站已清空');
                 setRecycleFiles([]);
                 refreshCurrentView({ silent: true });
             } else {
                 message.error(data.message || '清空回收站失败');
             }
         } catch (err) {
-            message.error(err.response?.data?.message || '清空回收站失败');
+            message.error(err?.message || err.response?.data?.message || '清空回收站失败');
         }
     };
 
