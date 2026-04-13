@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Progress, Typography, message, Space, Tag, Card, Alert, List } from 'antd';
 import { UploadOutlined, InboxOutlined, ReloadOutlined, DeleteOutlined, PauseOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
-import { initUpload, uploadChunk, mergeChunks, getMergeStatus, cancelUploadSession } from '../api/file';
+import { initUpload, uploadChunk, mergeChunks, getMergeStatus, cancelUploadSession, getStorageSummary } from '../api/file';
 import store from '../store';
 import { addTasks, patchTask, removeTaskById, clearDoneTasks as clearDoneTasksAction, setUploadingAll } from '../store/uploadSlice';
 
@@ -12,6 +12,7 @@ const MERGE_POLL_MAX_ROUNDS = 240;
 
 export default function UploadPage() {
     const dispatch = useDispatch();
+    const [storageSummary, setStorageSummary] = useState(null);
 
     //从redux中获取上传任务列表和批量上传状态
     const tasks = useSelector((state) => state.upload.tasks);
@@ -45,8 +46,31 @@ export default function UploadPage() {
         };
     }, []);
 
+    useEffect(() => {
+        fetchStorageSummary();
+    }, []);
+
     const updateTask = (taskId, patch) => {
         dispatch(patchTask({ taskId, patch }));
+    };
+
+    const formatBytes = (bytes) => {
+        if (!bytes || bytes <= 0) return '0 B';
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+        if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(2)} MB`;
+        return `${(bytes / 1073741824).toFixed(2)} GB`;
+    };
+
+    const fetchStorageSummary = async () => {
+        try {
+            const { data } = await getStorageSummary();
+            if (data.code === 200) {
+                setStorageSummary(data.data || null);
+            }
+        } catch {
+            // ignore storage summary errors
+        }
     };
 
     const getTasksSnapshot = () => store.getState().upload.tasks;
@@ -104,6 +128,19 @@ export default function UploadPage() {
         () => tasks.filter((t) => t.status === 'uploading' || t.status === 'merging').length,
         [tasks]
     );
+
+    const waitingBytes = useMemo(
+        () => tasks
+            .filter((t) => t.status === 'pending' || t.status === 'uploading' || t.status === 'merging' || t.status === 'paused' || t.status === 'error')
+            .reduce((sum, t) => sum + (t.fileSize || 0), 0),
+        [tasks]
+    );
+
+    const storageUsagePercent = storageSummary?.usagePercent || 0;
+    const storageQuotaBytes = storageSummary?.quotaBytes || 0;
+    const storageReservedBytes = storageSummary?.reservedUsedBytes || storageSummary?.usedBytes || 0;
+    const storagePendingBytes = storageSummary?.pendingBytes || 0;
+    const storageRemainingBytes = storageSummary?.remainingBytes || 0;
 
     // 选择文件后准备上传任务
     const handleFileSelect = (e) => {
@@ -237,6 +274,7 @@ export default function UploadPage() {
                     totalChunks: 0,
                     uploadedChunks: [],
                 });
+                fetchStorageSummary();
                 scheduleAutoRemoveTask(task.id);
             } else {
                 updateTask(task.id, { status: 'error', errorMessage: mergeRes.message || '合并失败' });
@@ -249,7 +287,7 @@ export default function UploadPage() {
     };
 
     //开始批量上传，内部会自动跳过已完成的任务
-    const startAllUploads = async () => {
+    const startAllUploads = () => {
         //获取当前所有任务的快照，筛选出待上传、错误或暂停状态的任务进行上传
         const toUpload = getTasksSnapshot().filter((t) => t.status === 'pending' || t.status === 'error' || t.status === 'paused');
 
@@ -258,28 +296,33 @@ export default function UploadPage() {
             return;
         }
         dispatch(setUploadingAll(true));
-        //并发执行所有待上传任务，使用Promise.allSettled来等待所有任务完成，无论成功或失败
-        await Promise.allSettled(toUpload.map((task) => uploadSingleTask(task)));
+        // 仅负责启动批量任务，避免按钮 loading 被“分片上传+后台合并轮询”长时间占用。
+        const runningPromises = toUpload.map((task) => uploadSingleTask(task));
         dispatch(setUploadingAll(false));
+        message.info('已开始上传，分片合并在后台异步执行');
 
-        const latest = getTasksSnapshot();
-        const hasPaused = latest.some((t) => t.status === 'paused');
-        const hasError = latest.some((t) => t.status === 'error');
-        const allDone = latest.length > 0 && latest.every((t) => t.status === 'done');
+        void Promise.allSettled(runningPromises).then(() => {
+            fetchStorageSummary();
 
-        if (allDone) {
-            message.success('批量上传执行完成');
-            return;
-        }
-        if (hasPaused && !hasError) {
-            message.info('批量上传已暂停，可继续上传');
-            return;
-        }
-        if (hasError) {
-            message.warning('批量上传已结束，部分任务失败');
-            return;
-        }
-        message.info('批量上传已结束');
+            const latest = getTasksSnapshot();
+            const hasPaused = latest.some((t) => t.status === 'paused');
+            const hasError = latest.some((t) => t.status === 'error');
+            const allDone = latest.length > 0 && latest.every((t) => t.status === 'done');
+
+            if (allDone) {
+                message.success('批量上传执行完成');
+                return;
+            }
+            if (hasPaused && !hasError) {
+                message.info('批量上传已暂停，可继续上传');
+                return;
+            }
+            if (hasError) {
+                message.warning('批量上传已结束，部分任务失败');
+                return;
+            }
+            message.info('批量上传已结束');
+        });
     };
 
 
@@ -298,6 +341,7 @@ export default function UploadPage() {
         if (task.uploadId && task.status !== 'done') {
             try {
                 await cancelUploadSession(task.uploadId);
+                fetchStorageSummary();
             } catch {
                 message.warning('上传任务已移除，但服务端分片清理可能失败');
             }
@@ -355,6 +399,24 @@ export default function UploadPage() {
                     <Tag color="success">已完成 {successCount}</Tag>
                 </Space>
             </div>
+
+            <Card className="ol-card-surface" bodyStyle={{ padding: 16 }} style={{ marginBottom: 14 }}>
+                <Space direction="vertical" style={{ width: '100%' }} size={6}>
+                    <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                        <Typography.Text strong>存储空间</Typography.Text>
+                        <Tag color={storageUsagePercent >= 90 ? 'error' : storageUsagePercent >= 75 ? 'warning' : 'success'}>
+                            {storageUsagePercent}%
+                        </Tag>
+                    </Space>
+                    <Progress percent={storageUsagePercent} showInfo={false} />
+                    <Typography.Text type="secondary">
+                        已用 {formatBytes(storageReservedBytes)}（含上传占用 {formatBytes(storagePendingBytes)}） / 总配额 {formatBytes(storageQuotaBytes)}，剩余 {formatBytes(storageRemainingBytes)}
+                    </Typography.Text>
+                    <Typography.Text type="secondary">
+                        当前任务累计大小：{formatBytes(waitingBytes)}
+                    </Typography.Text>
+                </Space>
+            </Card>
 
             <Card className="ol-card-surface" bodyStyle={{ padding: 16 }}>
                 <div className="ol-upload-drop">

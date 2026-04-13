@@ -34,3 +34,15 @@ export const listUsers = () => request.get('/auth/admin/users');
 // 管理员：更新用户状态 1启用 0禁用
 export const updateUserStatus = (userId, payload) =>
 	request.put(`/auth/admin/users/${userId}/status`, payload);
+
+// 管理员：系统通知列表
+export const listAdminNotices = (params) => request.get('/auth/admin/notices', { params });
+
+// 用户：系统通知列表（登录用户均可见）
+export const listUserNotices = (params) => request.get('/auth/notices', { params });
+
+// 管理员：发布系统通知
+export const createAdminNotice = (payload) => request.post('/auth/admin/notices', payload);
+
+// 管理员：删除系统通知
+export const deleteAdminNotice = (noticeId) => request.delete(`/auth/admin/notices/${noticeId}`);

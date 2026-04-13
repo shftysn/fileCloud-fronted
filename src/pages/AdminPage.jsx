@@ -2,11 +2,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Typography, Card, Descriptions, Table, Tag, Space, Button, message, Alert, Modal, Input } from 'antd';
 import { useDispatch, useSelector } from 'react-redux';
 import { ReloadOutlined } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import { listUsers, refreshToken, updateUserStatus } from '../api/auth';
 import { setAccessToken } from '../store/authSlice';
 
 export default function AdminPage() {
   const dispatch = useDispatch();
+  const navigate = useNavigate();
   const currentUser = useSelector((state) => state.auth.currentUser);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -142,10 +144,15 @@ export default function AdminPage() {
     <div>
       <div className="ol-upload-head">
         <div>
-          <Typography.Title level={4} style={{ margin: 0 }}>管理员后台</Typography.Title>
-          <Typography.Text type="secondary">系统概览、用户状态管理与权限检查</Typography.Text>
+          <Typography.Title level={4} style={{ margin: 0 }}>管理员功能 - 用户管理</Typography.Title>
+          <Typography.Text type="secondary">管理员账号与普通用户账号状态管理</Typography.Text>
         </div>
-        {isAdmin && <Button icon={<ReloadOutlined />} onClick={fetchUsers}>刷新用户数据</Button>}
+        {isAdmin && (
+          <Space>
+            <Button onClick={() => navigate('/admin/notices')}>进入系统通知栏</Button>
+            <Button icon={<ReloadOutlined />} onClick={fetchUsers}>刷新用户数据</Button>
+          </Space>
+        )}
       </div>
 
       <div className="ol-admin-grid">

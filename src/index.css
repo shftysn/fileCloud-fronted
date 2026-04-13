@@ -214,6 +214,21 @@ h5.ant-typography {
     height: calc(100vh - 126px);
 }
 
+.ol-menu-notice-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ol-menu-notice-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #ef4444;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16);
+    flex: 0 0 auto;
+}
+
 .ol-sider .ant-menu-item {
     border-radius: 12px;
     margin: 4px 0;
@@ -224,6 +239,14 @@ h5.ant-typography {
 
 .ol-sider .ant-menu-item-selected {
     background: linear-gradient(90deg, rgba(47, 111, 235, 0.3), rgba(34, 211, 238, 0.15)) !important;
+}
+
+.ol-sider .ant-menu-item-group-title {
+    color: #93c5fd !important;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding-inline: 12px !important;
+    margin-top: 6px;
 }
 
 .ol-sider-foot {
@@ -302,6 +325,22 @@ h5.ant-typography {
 
 .ol-header-hello {
     font-size: 13px;
+}
+
+.ol-notice-trigger {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    border: 1px solid #dbeafe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+}
+
+.ol-notice-trigger:hover {
+    background: #dbeafe;
 }
 
 .ol-avatar-trigger {
@@ -420,6 +459,87 @@ h5.ant-typography {
     background: #f1f5f9;
 }
 
+.ol-admin-notice-overlay .ant-popover-inner {
+    width: min(420px, 76vw);
+    max-width: min(420px, 76vw);
+    overflow: hidden;
+}
+
+.ol-admin-notice-popover {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.ol-admin-notice-head {
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.ol-admin-notice-list {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    max-height: 360px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ol-admin-notice-item {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 8px 10px;
+    background: #f8fafc;
+}
+
+.ol-admin-notice-item:hover {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+}
+
+.ol-admin-notice-item-title {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.ol-admin-notice-item-title span {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.ol-admin-notice-item-publisher {
+    color: #64748b;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.ol-admin-notice-detail-content {
+    color: #334155;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
 .ol-user-popover-item.danger {
     color: #dc2626;
 }
@@ -457,6 +577,143 @@ h5.ant-typography {
 
 .ol-content-inner {
     padding: 20px;
+}
+
+.ol-notice-center-page {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ol-notice-center-body {
+    border: 1px solid var(--ol-border);
+    border-radius: var(--ol-radius-md);
+    background: var(--ol-surface-soft);
+    min-height: 480px;
+    padding: 12px;
+}
+
+.ol-notice-center-loading {
+    min-height: 360px;
+    display: grid;
+    place-items: center;
+}
+
+.ol-notice-mail-list-wrap {
+    width: 100%;
+}
+
+.ol-notice-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.ol-notice-section-title.unread {
+    color: #b91c1c;
+}
+
+.ol-notice-section-title.read {
+    color: #64748b;
+}
+
+.ol-notice-empty-line {
+    color: #94a3b8;
+    font-size: 13px;
+    margin-bottom: 6px;
+}
+
+.ol-notice-mail-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ol-notice-mail-item {
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid #dbe5f3;
+    background: #ffffff;
+    padding: 10px 12px;
+    cursor: pointer;
+    text-align: left;
+}
+
+.ol-notice-mail-item.is-unread {
+    border-color: #fecaca;
+    background: #fff9f9;
+}
+
+.ol-notice-mail-item.is-read {
+    border-color: #e2e8f0;
+    background: #f8fafc;
+    color: #6b7280;
+}
+
+.ol-notice-mail-item:hover {
+    border-color: #93c5fd;
+    background: #eff6ff;
+}
+
+.ol-notice-mail-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.ol-notice-mail-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #ef4444;
+    flex: 0 0 auto;
+}
+
+.ol-notice-mail-title {
+    font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.ol-notice-mail-meta {
+    color: #64748b;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.ol-notice-detail-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ol-notice-back-btn {
+    width: fit-content;
+    padding-inline: 6px;
+}
+
+.ol-notice-detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.ol-notice-detail-content {
+    margin-top: 4px;
+    border: 1px solid var(--ol-border);
+    border-radius: var(--ol-radius-sm);
+    background: #ffffff;
+    padding: 12px;
+    color: #334155;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .ol-files-toolbar {
@@ -681,10 +938,21 @@ h5.ant-typography {
     margin-bottom: 14px;
 }
 
+.ol-admin-notice-form-grid {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 12px;
+}
+
+.ol-admin-notice-row {
+    width: 100%;
+}
+
 @media (max-width: 960px) {
 
     .ol-auth-grid,
-    .ol-admin-grid {
+    .ol-admin-grid,
+    .ol-admin-notice-form-grid {
         grid-template-columns: 1fr;
     }
 

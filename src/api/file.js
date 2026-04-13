@@ -38,6 +38,9 @@ export const resolveApiUrl = (url) => {
 // 初始化上传
 export const initUpload = (data) => request.post('/file/upload/init', data);
 
+// 存储空间摘要
+export const getStorageSummary = () => request.get('/file/storage/summary');
+
 // 上传单个分片
 export const uploadChunk = (uploadId, chunkIndex, file, onProgress) => {
   const formData = new FormData();

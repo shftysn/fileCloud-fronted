@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Table, Input, Button, Space, Popconfirm, Modal, message, Tag, TreeSelect, Breadcrumb, Tooltip, Typography } from 'antd';
+import { Table, Input, Button, Space, Popconfirm, Modal, message, Tag, TreeSelect, Breadcrumb, Tooltip, Typography, Progress, Card } from 'antd';
 import { useLocation } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import {
@@ -33,6 +33,7 @@ import {
     resolveApiUrl,
     listFavoriteFiles,
     setFavoriteFile,
+    getStorageSummary,
     listRecycleFiles,
     restoreRecycleFile,
     purgeRecycleFile,
@@ -79,6 +80,7 @@ export default function FilesPage() {
     const [previewUrl, setPreviewUrl] = useState('');
     const [previewText, setPreviewText] = useState('');
     const [previewTruncated, setPreviewTruncated] = useState(false);
+    const [storageSummary, setStorageSummary] = useState(null);
 
     const viewPathMap = {
         '/files': VIEW_FILES,
@@ -223,9 +225,21 @@ export default function FilesPage() {
         }
     };
 
+    const fetchStorageSummary = async () => {
+        try {
+            const { data } = await getStorageSummary();
+            if (data.code === 200) {
+                setStorageSummary(data.data || null);
+            }
+        } catch {
+            // ignore storage summary errors
+        }
+    };
+
     const refreshCurrentView = async (options = {}) => {
         if (activeView === VIEW_FILES) {
             await fetchFiles(options);
+            await fetchStorageSummary();
             return;
         }
         if (activeView === VIEW_FAVORITES) {
@@ -234,6 +248,7 @@ export default function FilesPage() {
         }
         if (activeView === VIEW_RECYCLE) {
             await fetchRecycleFiles(options);
+            await fetchStorageSummary();
             return;
         }
         await fetchShareRecords(options);
@@ -528,7 +543,7 @@ export default function FilesPage() {
             const { data } = await createShareLink(record.id, 24);
             if (data.code === 200) {
                 const token = data.data?.shareToken;
-                const url = `${window.location.origin}${getPublicShareDownloadUrl(token)}`;
+                const url = getPublicShareDownloadUrl(token);
                 setShareInfo({ token, url, expireTime: data.data?.expireTime });
                 setShareModalOpen(true);
                 fetchShareRecords();
@@ -648,6 +663,13 @@ export default function FilesPage() {
             : activeView === VIEW_RECYCLE
                 ? '回收站'
                 : '分享管理中心';
+
+    const storageUsedBytes = storageSummary?.usedBytes || 0;
+    const storagePendingBytes = storageSummary?.pendingBytes || 0;
+    const storageReservedBytes = storageSummary?.reservedUsedBytes || storageUsedBytes;
+    const storageQuotaBytes = storageSummary?.quotaBytes || 0;
+    const storageRemainingBytes = storageSummary?.remainingBytes || 0;
+    const storageUsagePercent = storageSummary?.usagePercent || 0;
 
     const fileColumns = [
         {
@@ -786,7 +808,7 @@ export default function FilesPage() {
             title: '操作',
             width: 280,
             render: (_, record) => {
-                const url = `${window.location.origin}${getPublicShareDownloadUrl(record.shareToken)}`;
+                const url = getPublicShareDownloadUrl(record.shareToken);
                 return (
                     <Space>
                         <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(url, '分享链接已复制')}>
@@ -813,6 +835,23 @@ export default function FilesPage() {
                         当前用户：{currentUser?.username || '访客'}
                     </Typography.Text>
                 </div>
+
+                {activeView !== VIEW_FAVORITES && activeView !== VIEW_SHARES && (
+                    <Card className="ol-card-surface" bodyStyle={{ padding: 12 }}>
+                        <Space direction="vertical" style={{ width: '100%' }} size={6}>
+                            <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                                <Typography.Text strong>存储空间</Typography.Text>
+                                <Tag color={storageUsagePercent >= 90 ? 'error' : storageUsagePercent >= 75 ? 'warning' : 'success'}>
+                                    {storageUsagePercent}%
+                                </Tag>
+                            </Space>
+                            <Progress percent={storageUsagePercent} showInfo={false} />
+                            <Typography.Text type="secondary">
+                                已用 {formatBytes(storageReservedBytes)}（含上传占用 {formatBytes(storagePendingBytes)}） / 总配额 {formatBytes(storageQuotaBytes)}，剩余 {formatBytes(storageRemainingBytes)}
+                            </Typography.Text>
+                        </Space>
+                    </Card>
+                )}
 
                 {activeView === VIEW_FILES && (
                     <Breadcrumb

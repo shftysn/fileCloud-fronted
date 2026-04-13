@@ -8,6 +8,7 @@ const AppRoutes = lazy(() => import('./router'));
 export default function App() {
   const dispatch = useDispatch();
   const initialized = useSelector((state) => state.auth.initialized);
+  const accessToken = useSelector((state) => state.auth.accessToken);
 
   useEffect(() => {
     // 这个 effect 的作用是：在应用启动时尝试恢复登录状态。
@@ -59,6 +60,30 @@ export default function App() {
       mounted = false;
     };
   }, [dispatch]);
+
+  useEffect(() => {
+    if (!initialized || !accessToken) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const meResp = await getCurrentUser();
+        if (meResp.data?.code === 200) {
+          dispatch(setCurrentUser(meResp.data.data));
+          return;
+        }
+
+        // 禁用账号场景由 request 拦截器统一处理：先提示原因，再延时退出登录。
+      } catch {
+        // ignore, request interceptor handles token refresh and redirect
+      }
+    }, 5000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [initialized, accessToken, dispatch]);
 
   if (!initialized) {
     return <div style={{ height: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;

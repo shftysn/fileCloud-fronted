@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Form, Input, Button, Typography, message, Divider, Space } from 'antd';
 import { UserOutlined, LockOutlined, GithubOutlined, CloudServerOutlined } from '@ant-design/icons';
@@ -7,9 +7,22 @@ import { getCurrentUser, githubAuthorizeUrl, login as loginApi } from '../api/au
 import { setAccessToken, setCurrentUser } from '../store/authSlice';
 
 export default function LoginPage() {
+  const DISABLED_MESSAGE_STORAGE_KEY = 'disabled_logout_message';
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const dispatch = useDispatch();
+
+  useEffect(() => {
+    try {
+      const disabledMessage = window.sessionStorage.getItem(DISABLED_MESSAGE_STORAGE_KEY);
+      if (disabledMessage) {
+        message.error(disabledMessage);
+        window.sessionStorage.removeItem(DISABLED_MESSAGE_STORAGE_KEY);
+      }
+    } catch {
+      // ignore sessionStorage errors
+    }
+  }, []);
 
   const onFinish = async (values) => {
     setLoading(true);

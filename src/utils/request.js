@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { message } from 'antd';
 import store from '../store';
 import { clearAuth, setAccessToken } from '../store/authSlice';
 //VITE_API_BASE_URL=https://api.huakaiwuqu.me/api
@@ -24,7 +25,7 @@ export const resolveApiUrl = (url) => {
 
     // 处理 basePath，去除末尾斜杠，确保拼接时路径正确。
     const basePath = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : '';
-    
+
     //以/api开头的直接添加到origin后面，不以/api开头的在VITE_API_BASE_URL后面添加url，最后返回完整的URL
     if (url.startsWith('/api/')) {
       return `${parsed.origin}${url}`;
@@ -73,6 +74,8 @@ request.interceptors.request.use((config) => {
 // 响应拦截：401 自动刷新 token
 let isRefreshing = false;
 let pendingQueue = [];
+const DISABLED_MESSAGE_STORAGE_KEY = 'disabled_logout_message';
+const DISABLED_LOGOUT_DELAY_MS = 1500;
 
 const redirectToLogin = () => {
   store.dispatch(clearAuth());
@@ -82,11 +85,81 @@ const redirectToLogin = () => {
   }
 };
 
+let disabledPromptShowing = false;
+let disabledLogoutScheduled = false;
+
+const isDisabledAccountMessage = (text) => typeof text === 'string' && text.includes('已被管理员禁用');
+
+const extractErrorMessage = (errorLike) => {
+  if (!errorLike) return '';
+
+  if (typeof errorLike === 'string') {
+    return errorLike;
+  }
+
+  const payload = errorLike?.response?.data;
+  if (typeof payload === 'string') {
+    return payload;
+  }
+  if (typeof payload?.message === 'string') {
+    return payload.message;
+  }
+
+  if (typeof errorLike?.message === 'string' && errorLike.message) {
+    return errorLike.message;
+  }
+  return '';
+};
+
+const handleDisabledAccount = (text) => {
+  if (!isDisabledAccountMessage(text)) {
+    return false;
+  }
+
+  const hasToken = Boolean(store.getState().auth.accessToken);
+  if (!hasToken) {
+    return true;
+  }
+
+  const tip = text || '账号已被管理员禁用，请联系管理员';
+  try {
+    window.sessionStorage.setItem(DISABLED_MESSAGE_STORAGE_KEY, tip);
+  } catch {
+    // ignore sessionStorage errors
+  }
+
+  if (!disabledPromptShowing) {
+    disabledPromptShowing = true;
+    message.error(tip, 1.5);
+  }
+
+  if (!disabledLogoutScheduled) {
+    disabledLogoutScheduled = true;
+    window.setTimeout(() => {
+      disabledPromptShowing = false;
+      disabledLogoutScheduled = false;
+      redirectToLogin();
+    }, DISABLED_LOGOUT_DELAY_MS);
+  }
+
+  return true;
+};
+
 request.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    const result = res?.data;
+    if (result && result.code !== 200) {
+      handleDisabledAccount(result.message);
+    }
+    return res;
+  },
   async (error) => {
     const originalRequest = error.config;
     const reqUrl = originalRequest?.url || '';
+    const errorMessage = extractErrorMessage(error);
+    if (handleDisabledAccount(errorMessage)) {
+      return Promise.reject(error);
+    }
     // 这些接口本身与登录/刷新流程相关，出现 401 时不应再次触发 refresh，避免死循环。
     const shouldSkipRefresh = reqUrl.includes('/auth/login')
       || reqUrl.includes('/auth/email-code/send')
@@ -131,11 +204,14 @@ request.interceptors.response.use(
           return request(originalRequest);
         }
         throw new Error(data?.message || 'refresh token failed');
-      } catch {
+      } catch (refreshError) {
         // 刷新失败：让队列请求统一失败，清空登录态并回到登录页。
         pendingQueue.forEach((cb) => cb(null));
         pendingQueue = [];
-        redirectToLogin();
+        const refreshErrorMessage = extractErrorMessage(refreshError);
+        if (!handleDisabledAccount(refreshErrorMessage)) {
+          redirectToLogin();
+        }
       } finally {
         isRefreshing = false;
       }

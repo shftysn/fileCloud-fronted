@@ -1,6 +1,6 @@
 import React, { lazy } from 'react';
 import { Navigate, RouterProvider, createBrowserRouter } from 'react-router-dom';
-import { PrivateRoute, AdminRoute } from './guards';
+import { PrivateRoute, AdminRoute, UserRoute, HomeRedirect } from './guards';
 
 const LoginPage = lazy(() => import('../pages/LoginPage'));
 const RegisterPage = lazy(() => import('../pages/RegisterPage'));
@@ -8,7 +8,9 @@ const ResetPasswordPage = lazy(() => import('../pages/ResetPasswordPage'));
 const OAuthCallbackPage = lazy(() => import('../pages/OAuthCallbackPage'));
 const FilesPage = lazy(() => import('../pages/FilesPage'));
 const UploadPage = lazy(() => import('../pages/UploadPage'));
+const NoticeCenterPage = lazy(() => import('../pages/NoticeCenterPage'));
 const AdminPage = lazy(() => import('../pages/AdminPage'));
+const AdminNoticePage = lazy(() => import('../pages/AdminNoticePage'));
 const MainLayout = lazy(() => import('../layouts/MainLayout'));
 const ErrorPage = lazy(() => import('../pages/ErrorPage'));
 
@@ -44,33 +46,45 @@ export const router = createBrowserRouter([
         children: [
             {
                 index: true,
-                element: <Navigate to="/files" replace />,
+                element: <HomeRedirect />,
             },
             {
-                path: 'files',
-                element: <FilesPage />,
-            },
-            {
-                path: 'files/favorites',
-                element: <FilesPage />,
-            },
-            {
-                path: 'files/recycle',
-                element: <FilesPage />,
-            },
-            {
-                path: 'files/shares',
-                element: <FilesPage />,
+                path: 'files/*',
+                element: (
+                    <UserRoute>
+                        <FilesPage />
+                    </UserRoute>
+                ),
             },
             {
                 path: 'upload',
-                element: <UploadPage />,
+                element: (
+                    <UserRoute>
+                        <UploadPage />
+                    </UserRoute>
+                ),
+            },
+            {
+                path: 'notices',
+                element: <NoticeCenterPage />,
             },
             {
                 path: 'admin',
+                element: <Navigate to="/admin/users" replace />,
+            },
+            {
+                path: 'admin/users',
                 element: (
                     <AdminRoute>
                         <AdminPage />
+                    </AdminRoute>
+                ),
+            },
+            {
+                path: 'admin/notices',
+                element: (
+                    <AdminRoute>
+                        <AdminNoticePage />
                     </AdminRoute>
                 ),
             },
