@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-
+dist/
 # Build output
 
 dist-ssr/

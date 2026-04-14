@@ -1,18 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Progress, Typography, message, Space, Tag, Card, Alert, List } from 'antd';
-import { UploadOutlined, InboxOutlined, ReloadOutlined, DeleteOutlined, PauseOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import { Button, Progress, Typography, message, Space, Tag, Card, Alert, List, Modal, Input } from 'antd';
+import { UploadOutlined, InboxOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
-import { initUpload, uploadChunk, mergeChunks, getMergeStatus, cancelUploadSession, getStorageSummary } from '../api/file';
+import { initUpload, getOssSts, completeUpload, cancelUploadSession, getStorageSummary } from '../api/file';
 import store from '../store';
 import { addTasks, patchTask, removeTaskById, clearDoneTasks as clearDoneTasksAction, setUploadingAll } from '../store/uploadSlice';
 
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB，与后端保持一致
-const MERGE_POLL_INTERVAL_MS = 1500;
-const MERGE_POLL_MAX_ROUNDS = 240;
+const CHUNK_SIZE = 5 * 1024 * 1024;
+const STS_EXPIRE_AHEAD_MS = 2 * 60 * 1000;
 
 export default function UploadPage() {
     const dispatch = useDispatch();
     const [storageSummary, setStorageSummary] = useState(null);
+    const [renameModalOpen, setRenameModalOpen] = useState(false);
+    const [renamingTaskId, setRenamingTaskId] = useState(null);
+    const [renamingTaskValue, setRenamingTaskValue] = useState('');
 
     //从redux中获取上传任务列表和批量上传状态
     const tasks = useSelector((state) => state.upload.tasks);
@@ -21,8 +23,8 @@ export default function UploadPage() {
     //使用ref来持有当前任务列表和正在上传的任务ID集合，避免闭包问题和频繁的状态更新
     const tasksRef = useRef([]);
     const runningTaskIdsRef = useRef(new Set());
-    const pauseRequestedRef = useRef(new Set());
     const finishedCleanupTimersRef = useRef(new Map());
+    const stsCacheRef = useRef(null);
 
     useEffect(() => {
         tasksRef.current = tasks;
@@ -73,11 +75,18 @@ export default function UploadPage() {
         }
     };
 
-    const getTasksSnapshot = () => store.getState().upload.tasks;
-
-    const isTaskPaused = (taskId) => {
-        return pauseRequestedRef.current.has(taskId);
+    const releaseFailedUploadSession = async (uploadId) => {
+        if (!uploadId) {
+            return;
+        }
+        try {
+            await cancelUploadSession(uploadId);
+        } catch {
+            // ignore release failures to avoid masking original upload error
+        }
     };
+
+    const getTasksSnapshot = () => store.getState().upload.tasks;
 
     const scheduleAutoRemoveTask = (taskId, delayMs = 2000) => {
         const existing = finishedCleanupTimersRef.current.get(taskId);
@@ -91,36 +100,70 @@ export default function UploadPage() {
         finishedCleanupTimersRef.current.set(taskId, timerId);
     };
 
-    const sleep = (ms) => new Promise((resolve) => {
-        window.setTimeout(resolve, ms);
-    });
-
-    const waitMergeCompleted = async (uploadId) => {
-        for (let i = 0; i < MERGE_POLL_MAX_ROUNDS; i++) {
-            const { data } = await getMergeStatus(uploadId);
-            if (data.code !== 200) {
-                throw new Error(data.message || '查询合并状态失败');
-            }
-
-            const task = data.data || {};
-            if (task.status === 'success') {
-                return;
-            }
-            if (task.status === 'failed') {
-                throw new Error(task.message || '合并失败');
-            }
-            if (task.status === 'not_found') {
-                throw new Error(task.message || '合并任务不存在');
-            }
-            await sleep(MERGE_POLL_INTERVAL_MS);
+    const getStsPayload = async (forceRefresh = false) => {
+        const cached = stsCacheRef.current;
+        const now = Date.now();
+        if (!forceRefresh && cached && cached.expireAt - now > STS_EXPIRE_AHEAD_MS) {
+            return cached.payload;
         }
-        throw new Error('合并超时，请稍后刷新文件列表确认');
+
+        //获取oss临时凭证，成功后缓存并返回，失败则抛出错误
+        const { data } = await getOssSts();
+        if (data.code !== 200 || !data.data) {
+            throw new Error(data.message || '获取STS临时凭证失败');
+        }
+        const payload = data.data;
+        const expiration = payload.expiration ? new Date(payload.expiration).getTime() : (now + 45 * 60 * 1000);
+        const safeExpiration = Number.isFinite(expiration) ? expiration : (now + 45 * 60 * 1000);
+        stsCacheRef.current = { payload, expireAt: safeExpiration };
+        return payload;
+    };
+
+    const isStsExpiredError = (err) => {
+        const code = String(err?.code || '').toLowerCase();
+        return code.includes('securitytoken') || code.includes('invalidaccesskeyid');
+    };
+
+    const uploadToOss = async (objectKey, file, onProgress) => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                const sts = await getStsPayload(attempt > 0);
+                const { default: OSS } = await import('ali-oss');
+                const client = new OSS({
+                    region: sts.region,
+                    bucket: sts.bucket,
+                    endpoint: sts.endpoint,
+                    accessKeyId: sts.accessKeyId,
+                    accessKeySecret: sts.accessKeySecret,
+                    stsToken: sts.securityToken,
+                    timeout: 120000,
+                });
+
+                return await client.multipartUpload(objectKey, file, {
+                    parallel: 4,
+                    partSize: CHUNK_SIZE,
+                    mime: file.type || 'application/octet-stream',
+                    progress: async (percent) => {
+                        if (typeof onProgress === 'function') {
+                            onProgress(percent);
+                        }
+                    },
+                });
+            } catch (err) {
+                if (attempt === 0 && isStsExpiredError(err)) {
+                    stsCacheRef.current = null;
+                    continue;
+                }
+                throw err;
+            }
+        }
+        throw new Error('OSS上传失败');
     };
 
 
     //从redux中的任务列表计算不同状态的任务数量，用于界面显示和按钮状态控制
     const pendingCount = useMemo(
-        () => tasks.filter((t) => t.status === 'pending' || t.status === 'error' || t.status === 'paused').length,
+        () => tasks.filter((t) => t.status === 'pending' || t.status === 'error').length,
         [tasks]
     );
     const successCount = useMemo(() => tasks.filter((t) => t.status === 'done').length, [tasks]);
@@ -131,7 +174,7 @@ export default function UploadPage() {
 
     const waitingBytes = useMemo(
         () => tasks
-            .filter((t) => t.status === 'pending' || t.status === 'uploading' || t.status === 'merging' || t.status === 'paused' || t.status === 'error')
+            .filter((t) => t.status === 'pending' || t.status === 'uploading' || t.status === 'merging' || t.status === 'error')
             .reduce((sum, t) => sum + (t.fileSize || 0), 0),
         [tasks]
     );
@@ -155,11 +198,10 @@ export default function UploadPage() {
             fileName: file.name,
             fileSize: file.size,
             progress: 0,
-            status: 'pending', // pending(待定) | uploading | merging | done | error
+            status: 'pending', // pending | uploading | merging | done | error
             errorMessage: '',
             uploadId: null,
-            totalChunks: 0,
-            uploadedChunks: [],  //记录已上传分片索引，便于断点续传和进度计算
+            objectKey: null,
         }));
 
         dispatch(addTasks(prepared));
@@ -175,18 +217,16 @@ export default function UploadPage() {
             return;
         }
         runningTaskIdsRef.current.add(task.id);
-        pauseRequestedRef.current.delete(task.id);
 
         //更新任务状态为上传中，清除错误信息
         updateTask(task.id, { status: 'uploading', errorMessage: '' });
 
-        try {
-            let uploadId = task.uploadId;
-            let totalChunks = task.totalChunks;
-            let uploadedSet = new Set(task.uploadedChunks || []);
+        let uploadId = task.uploadId;
+        let objectKey = task.objectKey;
 
-            //如果没有上传会话ID或总分片数，说明是第一次上传或之前的会话无效，需要与后端交互初始化上传会话
-            if (!uploadId || !totalChunks) {
+        try {
+            // 没有上传会话时先初始化，服务端会返回 uploadId 与 objectKey。
+            if (!uploadId || !objectKey) {
                 const { data: initRes } = await initUpload({
                     fileName: task.fileName,
                     fileSize: task.fileSize,
@@ -197,124 +237,115 @@ export default function UploadPage() {
                     return;
                 }
                 uploadId = initRes.data.uploadId;
-                totalChunks = initRes.data.totalChunks;
-                uploadedSet = new Set(initRes.data.uploadedChunks || []);
+                objectKey = initRes.data.objectKey;
+                if (!objectKey) {
+                    throw new Error('服务端未返回OSS对象路径，无法继续上传');
+                }
 
                 updateTask(task.id, {
                     uploadId,
-                    totalChunks,
-                    uploadedChunks: Array.from(uploadedSet),
+                    objectKey,
                 });
             }
 
-            //如果已经有部分分片上传成功，先更新进度显示
-            updateTask(task.id, {
-                progress: Math.round((uploadedSet.size / totalChunks) * 100),
+            const uploadResult = await uploadToOss(objectKey, task.file, (percent) => {
+                const progress = Math.min(99, Math.round((percent || 0) * 100));
+                updateTask(task.id, { progress, status: 'uploading' });
             });
 
-            // 分片顺序上传，任务之间并发执行
-            for (let i = 0; i < totalChunks; i++) {
-                if (isTaskPaused(task.id)) {
-                    return;
-                }
-                if (uploadedSet.has(i)) continue;
-
-                //计算当前分片的起始和结束位置，从文件中切出对应的Blob对象
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, task.file.size);
-                const blob = task.file.slice(start, end);
-
-                try {
-                    //上传一个分片
-                    await uploadChunk(uploadId, i, blob, (e) => {
-                        //这里的e是上传进度对象，有属性loaded和total，可以计算当前分片的上传进度，并结合已上传的分片数量计算整体进度，更新任务状态
-                        //上传进度回调中计算当前分片的上传进度和整体进度，更新任务状态
-                        if (isTaskPaused(task.id)) {
-                            return;
-                        }
-                        const chunkFraction = e.total ? (e.loaded / e.total) : 0;
-                        const overall = Math.round(((uploadedSet.size + chunkFraction) / totalChunks) * 100);
-                        updateTask(task.id, { progress: Math.min(99, overall) });
-                    });
-
-                    uploadedSet.add(i);
-                    if (isTaskPaused(task.id)) {
-                        updateTask(task.id, {
-                            progress: Math.round((uploadedSet.size / totalChunks) * 100),
-                            status: 'paused',
-                            uploadedChunks: Array.from(uploadedSet),
-                        });
-                        return;
-                    }
-                    updateTask(task.id, {
-                        progress: Math.round((uploadedSet.size / totalChunks) * 100),
-                        status: 'uploading',
-                        uploadedChunks: Array.from(uploadedSet),
-                    });
-                } catch {
-                    updateTask(task.id, {
-                        status: 'error',
-                        errorMessage: `上传失败（分片 ${i}）`,
-                        uploadedChunks: Array.from(uploadedSet),
-                    });
-                    return;
-                }
-            }
-
-            //一个文件的所有分片上传成功后，通知后端合并分片
+            // 上传成功后通知后端落库并清理上传会话。
             updateTask(task.id, { status: 'merging' });
-            const { data: mergeRes } = await mergeChunks(uploadId);
-            if (mergeRes.code === 200) {
-                await waitMergeCompleted(uploadId);
+            const { data: completeRes } = await completeUpload({
+                uploadId,
+                objectKey,
+                etag: uploadResult?.res?.headers?.etag || uploadResult?.etag || '',
+            });
+            if (completeRes.code === 200) {
                 updateTask(task.id, {
                     status: 'done',
                     progress: 100,
                     errorMessage: '',
                     uploadId: null,
-                    totalChunks: 0,
-                    uploadedChunks: [],
+                    objectKey: null,
                 });
                 fetchStorageSummary();
                 scheduleAutoRemoveTask(task.id);
             } else {
-                updateTask(task.id, { status: 'error', errorMessage: mergeRes.message || '合并失败' });
+                await releaseFailedUploadSession(uploadId);
+                updateTask(task.id, { status: 'error', errorMessage: completeRes.message || '上传完成确认失败' });
+                updateTask(task.id, {
+                    uploadId: null,
+                    objectKey: null,
+                    progress: 0,
+                });
+                fetchStorageSummary();
             }
         } catch (err) {
+            await releaseFailedUploadSession(uploadId);
+            if (isStsExpiredError(err)) {
+                stsCacheRef.current = null;
+            }
             updateTask(task.id, { status: 'error', errorMessage: err?.message || '上传过程出错' });
+            updateTask(task.id, {
+                uploadId: null,
+                objectKey: null,
+                progress: 0,
+            });
+            fetchStorageSummary();
         } finally {
             runningTaskIdsRef.current.delete(task.id);
         }
     };
 
+    const openRenameTaskModal = (task) => {
+        if (!task) {
+            return;
+        }
+        setRenamingTaskId(task.id);
+        setRenamingTaskValue(task.fileName || '');
+        setRenameModalOpen(true);
+    };
+
+    const handleRenameTask = () => {
+        const name = renamingTaskValue.trim();
+        if (!name) {
+            message.warning('请输入文件名');
+            return;
+        }
+        if (!renamingTaskId) {
+            return;
+        }
+        updateTask(renamingTaskId, { fileName: name });
+        setRenameModalOpen(false);
+        setRenamingTaskId(null);
+        setRenamingTaskValue('');
+        message.success('已更新上传文件名');
+    };
+
     //开始批量上传，内部会自动跳过已完成的任务
     const startAllUploads = () => {
-        //获取当前所有任务的快照，筛选出待上传、错误或暂停状态的任务进行上传
-        const toUpload = getTasksSnapshot().filter((t) => t.status === 'pending' || t.status === 'error' || t.status === 'paused');
+        //获取当前所有任务的快照，筛选出待上传或失败状态任务进行上传
+        const toUpload = getTasksSnapshot().filter((t) => t.status === 'pending' || t.status === 'error');
 
         if (toUpload.length === 0) {
             message.info('没有可开始的上传任务');
             return;
         }
         dispatch(setUploadingAll(true));
-        // 仅负责启动批量任务，避免按钮 loading 被“分片上传+后台合并轮询”长时间占用。
+        // 仅负责启动批量任务，避免按钮 loading 被“上传+回调落库”长时间占用。
         const runningPromises = toUpload.map((task) => uploadSingleTask(task));
         dispatch(setUploadingAll(false));
-        message.info('已开始上传，分片合并在后台异步执行');
+        message.info('已开始上传，任务正在后台执行');
 
         void Promise.allSettled(runningPromises).then(() => {
             fetchStorageSummary();
 
             const latest = getTasksSnapshot();
-            const hasPaused = latest.some((t) => t.status === 'paused');
             const hasError = latest.some((t) => t.status === 'error');
             const allDone = latest.length > 0 && latest.every((t) => t.status === 'done');
 
             if (allDone) {
                 message.success('批量上传执行完成');
-                return;
-            }
-            if (hasPaused && !hasError) {
-                message.info('批量上传已暂停，可继续上传');
                 return;
             }
             if (hasError) {
@@ -337,39 +368,21 @@ export default function UploadPage() {
             finishedCleanupTimersRef.current.delete(taskId);
         }
 
-        pauseRequestedRef.current.add(taskId);
         if (task.uploadId && task.status !== 'done') {
             try {
                 await cancelUploadSession(task.uploadId);
                 fetchStorageSummary();
             } catch {
-                message.warning('上传任务已移除，但服务端分片清理可能失败');
+                message.warning('上传任务已移除，但服务端上传会话清理可能失败');
             }
         }
 
         dispatch(removeTaskById(taskId));
-        pauseRequestedRef.current.delete(taskId);
-    };
-
-
-    //暂停上传任务
-    const pauseTask = (taskId) => {
-        pauseRequestedRef.current.add(taskId);
-        updateTask(taskId, { status: 'paused' });
-    };
-
-    //继续上传任务
-    const resumeTask = async (taskId) => {
-        const task = tasksRef.current.find((t) => t.id === taskId);
-        if (!task) return;
-        pauseRequestedRef.current.delete(taskId);
-        await uploadSingleTask(task);
     };
 
     const retryTask = async (taskId) => {
         const task = tasksRef.current.find((t) => t.id === taskId);
         if (!task) return;
-        pauseRequestedRef.current.delete(taskId);
         updateTask(taskId, { status: 'pending', errorMessage: '' });
         await uploadSingleTask({ ...task, status: 'pending' });
     };
@@ -381,8 +394,7 @@ export default function UploadPage() {
     const statusTag = {
         pending: <Tag>等待上传</Tag>,
         uploading: <Tag color="processing">上传中</Tag>,
-        paused: <Tag color="warning">已暂停</Tag>,
-        merging: <Tag color="processing">合并中</Tag>,
+        merging: <Tag color="processing">处理中</Tag>,
         done: <Tag color="success">上传完成</Tag>,
         error: <Tag color="error">上传失败</Tag>,
     };
@@ -392,7 +404,7 @@ export default function UploadPage() {
             <div className="ol-upload-head">
                 <div>
                     <Typography.Title level={4} style={{ margin: 0 }}>上传中心</Typography.Title>
-                    <Typography.Text type="secondary">支持多个文件同时上传，每个文件独立进度</Typography.Text>
+                    <Typography.Text type="secondary">服务端签发STS，客户端直传OSS，每个文件独立进度</Typography.Text>
                 </div>
                 <Space>
                     <Tag color="blue">上传中 {uploadingCount}</Tag>
@@ -425,7 +437,7 @@ export default function UploadPage() {
                             <InboxOutlined style={{ color: 'var(--ol-primary)' }} />
                             <Typography.Text strong>选择要上传的文件（可多选）</Typography.Text>
                         </Space>
-                        <Typography.Text type="secondary">支持断点续传，单分片 5MB</Typography.Text>
+                        <Typography.Text type="secondary">直传OSS分片大小 5MB</Typography.Text>
                         <Space>
 
                             {/* 文件选择框 */}
@@ -459,27 +471,6 @@ export default function UploadPage() {
                     renderItem={(task) => (
                         <List.Item
                             actions={[
-                                task.status === 'uploading' ? (
-                                    <Button
-                                        key="pause"
-                                        size="small"
-                                        icon={<PauseOutlined />}
-                                        onClick={() => pauseTask(task.id)}
-                                    >
-                                        暂停
-                                    </Button>
-                                ) : null,
-                                task.status === 'paused' ? (
-                                    <Button
-                                        key="resume"
-                                        size="small"
-                                        type="primary"
-                                        icon={<PlayCircleOutlined />}
-                                        onClick={() => resumeTask(task.id)}
-                                    >
-                                        继续
-                                    </Button>
-                                ) : null,
                                 task.status === 'error' ? (
                                     <Button
                                         key="retry"
@@ -488,6 +479,16 @@ export default function UploadPage() {
                                         onClick={() => retryTask(task.id)}
                                     >
                                         重试
+                                    </Button>
+                                ) : null,
+                                (task.status === 'pending' || task.status === 'error') ? (
+                                    <Button
+                                        key="rename"
+                                        size="small"
+                                        icon={<EditOutlined />}
+                                        onClick={() => openRenameTaskModal(task)}
+                                    >
+                                        重命名
                                     </Button>
                                 ) : null,
                                 <Button
@@ -520,6 +521,25 @@ export default function UploadPage() {
                     )}
                 />
             </Card>
+
+            <Modal
+                title="重命名上传任务"
+                open={renameModalOpen}
+                onOk={handleRenameTask}
+                onCancel={() => {
+                    setRenameModalOpen(false);
+                    setRenamingTaskId(null);
+                    setRenamingTaskValue('');
+                }}
+            >
+                <Input
+                    placeholder="请输入上传后的文件名"
+                    value={renamingTaskValue}
+                    onChange={(e) => setRenamingTaskValue(e.target.value)}
+                    onPressEnter={handleRenameTask}
+                    maxLength={255}
+                />
+            </Modal>
         </div>
     );
 }

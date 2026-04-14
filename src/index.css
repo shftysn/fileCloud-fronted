@@ -47,6 +47,7 @@ body,
 body {
     font-family: "Manrope", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
     color: var(--ol-text);
+    overflow-y: scroll;
     background:
         radial-gradient(circle at 12% 20%, #dbeafe 0%, transparent 30%),
         radial-gradient(circle at 88% 8%, #dcfce7 0%, transparent 22%),
@@ -157,6 +158,10 @@ h5.ant-typography {
     background: linear-gradient(180deg, var(--ol-sidebar-bg) 0%, #111a2f 100%) !important;
     border-right: 1px solid rgba(255, 255, 255, 0.05);
     box-shadow: 6px 0 24px rgba(2, 6, 23, 0.35);
+    position: sticky !important;
+    top: 0;
+    height: 100vh;
+    overflow: hidden;
 }
 
 .ol-brand {
@@ -212,6 +217,9 @@ h5.ant-typography {
 
 .ol-side-menu {
     height: calc(100vh - 126px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-bottom: 56px;
 }
 
 .ol-menu-notice-label {
@@ -283,6 +291,9 @@ h5.ant-typography {
     gap: 12px;
     flex-wrap: wrap;
     box-shadow: 0 1px 0 rgba(148, 163, 184, 0.2);
+    position: sticky;
+    top: 0;
+    z-index: 10;
 }
 
 .ol-header-left {
@@ -718,7 +729,8 @@ h5.ant-typography {
 
 .ol-files-toolbar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    align-items: center;
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 14px;
@@ -735,7 +747,61 @@ h5.ant-typography {
     display: flex;
     gap: 10px;
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+}
+
+.ol-files-tools-left {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    position: relative;
+}
+
+.ol-toolbar-overflow-btn {
+    min-width: 34px;
+    padding-inline: 10px;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.ol-files-tools-right {
+    flex: 0 0 auto;
+}
+
+.ol-files-base-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: nowrap;
+    flex: 0 0 auto;
+}
+
+.ol-selection-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.ol-toolbar-action-measure {
+    position: absolute;
+    top: -9999px;
+    left: 0;
+    visibility: hidden;
+    pointer-events: none;
+    height: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.ol-toolbar-action-measure .ant-btn {
+    margin-right: 10px;
+}
+
+.ol-toolbar-action-measure .ant-btn:last-child {
+    margin-right: 0;
 }
 
 .ol-meta-cards {
@@ -768,6 +834,10 @@ h5.ant-typography {
     border: 1px solid var(--ol-border);
     border-radius: var(--ol-radius-md);
     overflow: hidden;
+}
+
+.ol-fixed-height-table .ant-table-body {
+    height: 420px;
 }
 
 .ol-files-table .ant-table-thead>tr>th {
@@ -823,6 +893,10 @@ h5.ant-typography {
 @media (max-width: 960px) {
     .ol-meta-cards {
         grid-template-columns: 1fr;
+    }
+
+    .ol-fixed-height-table .ant-table-body {
+        height: 320px;
     }
 }
 

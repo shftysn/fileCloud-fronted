@@ -38,24 +38,14 @@ export const resolveApiUrl = (url) => {
 // 初始化上传
 export const initUpload = (data) => request.post('/file/upload/init', data);
 
+// 获取 OSS STS 临时凭证
+export const getOssSts = () => request.get('/file/oss/sts');
+
+// 客户端直传完成后回调服务端落库
+export const completeUpload = (data) => request.post('/file/upload/complete', data);
+
 // 存储空间摘要
 export const getStorageSummary = () => request.get('/file/storage/summary');
-
-// 上传单个分片
-export const uploadChunk = (uploadId, chunkIndex, file, onProgress) => {
-  const formData = new FormData();
-  formData.append('file', file);
-  return request.post(`/file/upload/chunk?uploadId=${uploadId}&chunkIndex=${chunkIndex}`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    onUploadProgress: onProgress,
-  });
-};
-
-// 合并分片
-export const mergeChunks = (uploadId) => request.post(`/file/upload/merge?uploadId=${uploadId}`);
-
-// 查询合并任务状态
-export const getMergeStatus = (uploadId) => request.get('/file/upload/merge/status', { params: { uploadId } });
 
 // 取消上传并清理分片
 export const cancelUploadSession = (uploadId) => request.post(`/file/upload/cancel?uploadId=${uploadId}`);
@@ -95,6 +85,10 @@ export const createFolder = (folderName, parentId) =>
 // 移动文件/文件夹
 export const moveFile = (fileId, targetParentId) =>
   request.put(`/file/move/${fileId}`, null, { params: { targetParentId } });
+
+// 重命名文件/文件夹
+export const renameFileEntry = (fileId, newName) =>
+  request.put(`/file/rename/${fileId}`, null, { params: { newName } });
 
 // 创建分享链接
 export const createShareLink = (fileId, expireHours = 24) =>
