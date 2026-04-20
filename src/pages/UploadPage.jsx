@@ -1,13 +1,100 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Progress, Typography, message, Space, Tag, Card, Alert, List, Modal, Input } from 'antd';
-import { UploadOutlined, InboxOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
+import { UploadOutlined, InboxOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, PauseOutlined, CaretRightOutlined } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
 import { initUpload, getOssSts, completeUpload, cancelUploadSession, getStorageSummary } from '../api/file';
 import store from '../store';
-import { addTasks, patchTask, removeTaskById, clearDoneTasks as clearDoneTasksAction, setUploadingAll } from '../store/uploadSlice';
+import { addTasks, patchTask, patchTaskRuntime, removeTaskById, clearDoneTasks as clearDoneTasksAction, setUploadingAll } from '../store/uploadSlice';
+import { cacheUploadFile, getCachedUploadFile, removeCachedUploadFile, removeCachedUploadFiles } from '../utils/uploadFileCache';
 
-const CHUNK_SIZE = 5 * 1024 * 1024;
+const MB = 1024 * 1024;
+const DEFAULT_CHUNK_SIZE = 12 * MB;
+const LARGE_FILE_CHUNK_SIZE = 16 * MB;
+const HUGE_FILE_CHUNK_SIZE = 24 * MB;
 const STS_EXPIRE_AHEAD_MS = 2 * 60 * 1000;
+const PROGRESS_UPDATE_INTERVAL_MS = 400;
+const CHECKPOINT_PERSIST_INTERVAL_MS = 3000;
+const OSS_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
+const getFileFingerprint = (fileOrTask) => {
+    if (!fileOrTask) {
+        return '';
+    }
+    if (fileOrTask.name && Number(fileOrTask.size) >= 0 && Number(fileOrTask.lastModified) >= 0) {
+        return `${fileOrTask.name}_${fileOrTask.size}_${fileOrTask.lastModified}`;
+    }
+    if (fileOrTask.fileFingerprint) {
+        return fileOrTask.fileFingerprint;
+    }
+    const taskId = String(fileOrTask.id || '');
+    return taskId.replace(/_\d+$/, '');
+};
+
+const toPlainJson = (value) => {
+    if (value == null) {
+        return null;
+    }
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch {
+        return null;
+    }
+};
+
+const normalizeCheckpointArray = (value) => {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return value.map((item) => toPlainJson(item));
+};
+
+const normalizeUploadCheckpoint = (checkpoint, file, objectKey) => {
+    const plain = toPlainJson(checkpoint);
+    if (!plain || typeof plain !== 'object') {
+        return null;
+    }
+    const expectedPartSize = getChunkSize(file?.size || Number(plain.fileSize) || 0);
+
+    if (objectKey && plain.name && plain.name !== objectKey) {
+        return null;
+    }
+    if (file?.size > 0 && Number(plain.fileSize) > 0 && Number(plain.fileSize) !== Number(file.size)) {
+        return null;
+    }
+    if (Number(plain.partSize) > 0 && Number(plain.partSize) !== expectedPartSize) {
+        return null;
+    }
+
+    return {
+        ...plain,
+        fileSize: Number(plain.fileSize) > 0 ? Number(plain.fileSize) : (file?.size || 0),
+        partSize: expectedPartSize,
+        doneParts: normalizeCheckpointArray(plain.doneParts),
+    };
+};
+
+const isInvalidCheckpointError = (err) => {
+    const message = String(err?.message || '').toLowerCase();
+    return message.includes('non-writable length')
+        || message.includes("can't define array index property past the end of an array");
+};
+
+const getChunkSize = (fileSize) => {
+    if (fileSize >= 5 * 1024 * MB) {
+        return HUGE_FILE_CHUNK_SIZE;
+    }
+    if (fileSize >= 1024 * MB) {
+        return LARGE_FILE_CHUNK_SIZE;
+    }
+    return DEFAULT_CHUNK_SIZE;
+};
+
+const getUploadParallel = (fileSize) => {
+    if (fileSize >= 1024 * MB) {
+        return 3;
+    }
+    return 4;
+};
 
 export default function UploadPage() {
     const dispatch = useDispatch();
@@ -24,10 +111,59 @@ export default function UploadPage() {
     const tasksRef = useRef([]);
     const runningTaskIdsRef = useRef(new Set());
     const finishedCleanupTimersRef = useRef(new Map());
+    const uploadRuntimeRef = useRef(new Map());
     const stsCacheRef = useRef(null);
+    const restoringTaskIdsRef = useRef(new Set());
 
     useEffect(() => {
         tasksRef.current = tasks;
+    }, [tasks]);
+
+    useEffect(() => {
+        tasks.forEach((task) => {
+            if (!task?.id) {
+                return;
+            }
+
+            const runtime = uploadRuntimeRef.current.get(task.id) || {};
+            if (!runtime.checkpoint && task.uploadCheckpoint) {
+                runtime.checkpoint = normalizeUploadCheckpoint(task.uploadCheckpoint, task.file, task.objectKey);
+                uploadRuntimeRef.current.set(task.id, runtime);
+                return;
+            }
+            if (!task.uploadCheckpoint && runtime.checkpoint && !runningTaskIdsRef.current.has(task.id)) {
+                runtime.checkpoint = null;
+                uploadRuntimeRef.current.set(task.id, runtime);
+            }
+        });
+    }, [tasks]);
+
+    useEffect(() => {
+        tasks.forEach((task) => {
+            if (!task || task.status === 'done' || task.file instanceof File) {
+                return;
+            }
+            if (restoringTaskIdsRef.current.has(task.id)) {
+                return;
+            }
+
+            restoringTaskIdsRef.current.add(task.id);
+            void getCachedUploadFile(task.id)
+                .then((cachedFile) => {
+                    if (!(cachedFile instanceof File)) {
+                        return;
+                    }
+                    updateTask(task.id, {
+                        file: cachedFile,
+                        fileName: cachedFile.name,
+                        fileSize: cachedFile.size,
+                        errorMessage: '',
+                    });
+                })
+                .finally(() => {
+                    restoringTaskIdsRef.current.delete(task.id);
+                });
+        });
     }, [tasks]);
 
     useEffect(() => {
@@ -45,6 +181,7 @@ export default function UploadPage() {
                 clearTimeout(timerId);
             });
             finishedCleanupTimersRef.current.clear();
+            uploadRuntimeRef.current.clear();
         };
     }, []);
 
@@ -56,12 +193,38 @@ export default function UploadPage() {
         dispatch(patchTask({ taskId, patch }));
     };
 
+    const updateTaskRuntimeState = (taskId, patch) => {
+        dispatch(patchTaskRuntime({ taskId, patch }));
+    };
+
     const formatBytes = (bytes) => {
         if (!bytes || bytes <= 0) return '0 B';
         if (bytes < 1024) return `${bytes} B`;
         if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
         if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(2)} MB`;
         return `${(bytes / 1073741824).toFixed(2)} GB`;
+    };
+
+    const formatMegabytes = (bytes) => `${(Math.max(0, bytes || 0) / MB).toFixed(2)} MB`;
+
+    const getUploadedBytes = (task) => {
+        if (!task) {
+            return 0;
+        }
+        if (task.status === 'done') {
+            return task.fileSize || 0;
+        }
+        const fileSize = task.fileSize || 0;
+        return Math.min(fileSize, Math.round((Number(task.progress) || 0) * fileSize / 100));
+    };
+
+    const getTaskProgressText = (task) => {
+        const uploadedBytes = getUploadedBytes(task);
+        const totalBytes = task?.fileSize || 0;
+        if (task?.status === 'merging') {
+            return `已上传 ${formatMegabytes(totalBytes)} / ${formatMegabytes(totalBytes)}，等待服务端确认`;
+        }
+        return `已上传 ${formatMegabytes(uploadedBytes)} / ${formatMegabytes(totalBytes)}`;
     };
 
     const fetchStorageSummary = async () => {
@@ -100,6 +263,66 @@ export default function UploadPage() {
         finishedCleanupTimersRef.current.set(taskId, timerId);
     };
 
+    const clearTaskRuntime = (taskId) => {
+        uploadRuntimeRef.current.delete(taskId);
+    };
+
+    const persistTaskUploadSnapshot = (taskId, patch = {}) => {
+        const runtime = uploadRuntimeRef.current.get(taskId) || {};
+        runtime.lastCheckpointPersistAt = Date.now();
+        uploadRuntimeRef.current.set(taskId, runtime);
+        updateTask(taskId, {
+            uploadCheckpoint: runtime.checkpoint || null,
+            ...patch,
+        });
+    };
+
+    const updateTaskProgress = (taskId, progress, options = {}) => {
+        const { forcePersist = false, status } = options;
+        const runtime = uploadRuntimeRef.current.get(taskId) || {};
+        const nextProgress = Math.max(0, Math.min(99, progress));
+        const now = Date.now();
+        const shouldRefreshUi = forcePersist
+            || runtime.lastProgressValue !== nextProgress
+            || !runtime.lastProgressUiAt
+            || (now - runtime.lastProgressUiAt >= PROGRESS_UPDATE_INTERVAL_MS);
+
+        runtime.lastProgressValue = nextProgress;
+        if (shouldRefreshUi) {
+            runtime.lastProgressUiAt = now;
+            uploadRuntimeRef.current.set(taskId, runtime);
+            updateTaskRuntimeState(taskId, {
+                progress: nextProgress,
+                ...(status ? { status } : {}),
+            });
+        } else {
+            uploadRuntimeRef.current.set(taskId, runtime);
+        }
+
+        if (forcePersist) {
+            persistTaskUploadSnapshot(taskId, {
+                progress: nextProgress,
+                ...(status ? { status } : {}),
+            });
+        }
+    };
+
+    const isUploadCanceled = (taskId, err) => {
+        const runtime = uploadRuntimeRef.current.get(taskId);
+        if (runtime?.cancelRequested) {
+            return true;
+        }
+        const name = String(err?.name || '').toLowerCase();
+        if (name === 'cancel' || name === 'abort') {
+            return true;
+        }
+        const client = runtime?.client;
+        if (client && typeof client.isCancel === 'function') {
+            return client.isCancel();
+        }
+        return false;
+    };
+
     const getStsPayload = async (forceRefresh = false) => {
         const cached = stsCacheRef.current;
         const now = Date.now();
@@ -124,8 +347,10 @@ export default function UploadPage() {
         return code.includes('securitytoken') || code.includes('invalidaccesskeyid');
     };
 
-    const uploadToOss = async (objectKey, file, onProgress) => {
-        for (let attempt = 0; attempt < 2; attempt++) {
+    const uploadToOss = async (taskId, objectKey, file, onProgress) => {
+        const partSize = getChunkSize(file.size || 0);
+        const parallel = getUploadParallel(file.size || 0);
+        for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 const sts = await getStsPayload(attempt > 0);
                 const { default: OSS } = await import('ali-oss');
@@ -136,16 +361,31 @@ export default function UploadPage() {
                     accessKeyId: sts.accessKeyId,
                     accessKeySecret: sts.accessKeySecret,
                     stsToken: sts.securityToken,
-                    timeout: 120000,
+                    timeout: OSS_REQUEST_TIMEOUT_MS,
                 });
 
+                const runtime = uploadRuntimeRef.current.get(taskId) || {};
+                runtime.client = client;
+                runtime.checkpoint = normalizeUploadCheckpoint(runtime.checkpoint, file, objectKey);
+                runtime.lastPartSize = partSize;
+                uploadRuntimeRef.current.set(taskId, runtime);
+
                 return await client.multipartUpload(objectKey, file, {
-                    parallel: 4,
-                    partSize: CHUNK_SIZE,
+                    parallel,
+                    partSize,
                     mime: file.type || 'application/octet-stream',
-                    progress: async (percent) => {
+                    checkpoint: runtime.checkpoint,
+                    progress: async (percent, checkpoint) => {
+                        const latestRuntime = uploadRuntimeRef.current.get(taskId) || {};
+                        latestRuntime.checkpoint = normalizeUploadCheckpoint(checkpoint, file, objectKey);
+                        latestRuntime.lastPartSize = partSize;
+                        uploadRuntimeRef.current.set(taskId, latestRuntime);
                         if (typeof onProgress === 'function') {
-                            onProgress(percent);
+                            const now = Date.now();
+                            const shouldPersistCheckpoint = percent >= 1
+                                || !latestRuntime.lastCheckpointPersistAt
+                                || (now - latestRuntime.lastCheckpointPersistAt >= CHECKPOINT_PERSIST_INTERVAL_MS);
+                            onProgress(percent, { shouldPersistCheckpoint });
                         }
                     },
                 });
@@ -153,6 +393,15 @@ export default function UploadPage() {
                 if (attempt === 0 && isStsExpiredError(err)) {
                     stsCacheRef.current = null;
                     continue;
+                }
+                if (isInvalidCheckpointError(err)) {
+                    const runtime = uploadRuntimeRef.current.get(taskId) || {};
+                    runtime.checkpoint = null;
+                    uploadRuntimeRef.current.set(taskId, runtime);
+                    persistTaskUploadSnapshot(taskId, { progress: 0 });
+                    if (attempt < 2) {
+                        continue;
+                    }
                 }
                 throw err;
             }
@@ -163,7 +412,7 @@ export default function UploadPage() {
 
     //从redux中的任务列表计算不同状态的任务数量，用于界面显示和按钮状态控制
     const pendingCount = useMemo(
-        () => tasks.filter((t) => t.status === 'pending' || t.status === 'error').length,
+        () => tasks.filter((t) => t.status === 'pending' || t.status === 'paused' || t.status === 'error').length,
         [tasks]
     );
     const successCount = useMemo(() => tasks.filter((t) => t.status === 'done').length, [tasks]);
@@ -174,16 +423,19 @@ export default function UploadPage() {
 
     const waitingBytes = useMemo(
         () => tasks
-            .filter((t) => t.status === 'pending' || t.status === 'uploading' || t.status === 'merging' || t.status === 'error')
+            .filter((t) => t.status === 'pending' || t.status === 'paused' || t.status === 'uploading' || t.status === 'merging' || t.status === 'error')
             .reduce((sum, t) => sum + (t.fileSize || 0), 0),
         [tasks]
     );
 
-    const storageUsagePercent = storageSummary?.usagePercent || 0;
+    const storageUsedBytes = storageSummary?.usedBytes || 0;
     const storageQuotaBytes = storageSummary?.quotaBytes || 0;
     const storageReservedBytes = storageSummary?.reservedUsedBytes || storageSummary?.usedBytes || 0;
     const storagePendingBytes = storageSummary?.pendingBytes || 0;
-    const storageRemainingBytes = storageSummary?.remainingBytes || 0;
+    const storageRemainingBytes = storageSummary?.remainingBytes ?? Math.max(0, storageQuotaBytes - storageUsedBytes);
+    const storageReservedRemainingBytes = storageSummary?.reservedRemainingBytes ?? Math.max(0, storageQuotaBytes - storageReservedBytes);
+    const storageUsagePercent = storageSummary?.usagePercent ?? (storageQuotaBytes <= 0 ? 0 : Math.min(100, Math.round((storageUsedBytes * 100) / storageQuotaBytes)));
+    const storageReservedPercent = storageSummary?.reservedUsagePercent ?? (storageQuotaBytes <= 0 ? 0 : Math.min(100, Math.round((storageReservedBytes * 100) / storageQuotaBytes)));
 
     // 选择文件后准备上传任务
     const handleFileSelect = (e) => {
@@ -192,25 +444,73 @@ export default function UploadPage() {
         const fileList = Array.from(e.target.files || []);
         if (fileList.length === 0) return;
 
-        const prepared = fileList.map((file, idx) => ({
-            id: `${file.name}_${file.size}_${file.lastModified}_${idx}`,
-            file,
-            fileName: file.name,
-            fileSize: file.size,
-            progress: 0,
-            status: 'pending', // pending | uploading | merging | done | error
-            errorMessage: '',
-            uploadId: null,
-            objectKey: null,
-        }));
+        const snapshot = getTasksSnapshot();
+        const prepared = [];
 
-        dispatch(addTasks(prepared));
+        fileList.forEach((file) => {
+            const fingerprint = getFileFingerprint(file);
+            const existed = snapshot.find((task) => {
+                const taskFingerprint = getFileFingerprint(task);
+                return taskFingerprint === fingerprint;
+            });
+
+            if (existed) {
+                updateTask(existed.id, {
+                    file,
+                    fileName: file.name,
+                    fileSize: file.size,
+                    fileFingerprint: fingerprint,
+                    errorMessage: '',
+                });
+                void cacheUploadFile(existed.id, file);
+                return;
+            }
+
+            prepared.push({
+                id: fingerprint,
+                file,
+                fileName: file.name,
+                fileSize: file.size,
+                fileFingerprint: fingerprint,
+                progress: 0,
+                status: 'pending', // pending | paused | uploading | merging | done | error
+                errorMessage: '',
+                uploadId: null,
+                objectKey: null,
+                uploadCheckpoint: null,
+            });
+            void cacheUploadFile(fingerprint, file);
+        });
+
+        if (prepared.length > 0) {
+            dispatch(addTasks(prepared));
+        }
         e.target.value = '';
     };
 
 
     // 核心上传逻辑，单个任务的上传过程
     const uploadSingleTask = async (task) => {
+        let uploadFile = task.file;
+        if (!(uploadFile instanceof File)) {
+            uploadFile = await getCachedUploadFile(task.id);
+            if (uploadFile instanceof File) {
+                updateTask(task.id, {
+                    file: uploadFile,
+                    fileName: uploadFile.name,
+                    fileSize: uploadFile.size,
+                    errorMessage: '',
+                });
+            }
+        }
+
+        if (!(uploadFile instanceof File)) {
+            updateTask(task.id, {
+                status: 'paused',
+                errorMessage: '未找到本地缓存文件，请重新选择文件',
+            });
+            return;
+        }
 
         //如果任务已经在上传中，直接返回，避免重复上传
         if (runningTaskIdsRef.current.has(task.id)) {
@@ -218,8 +518,20 @@ export default function UploadPage() {
         }
         runningTaskIdsRef.current.add(task.id);
 
+        const runtime = uploadRuntimeRef.current.get(task.id) || {};
+        runtime.pauseRequested = false;
+        runtime.removeRequested = false;
+        runtime.cancelRequested = false;
+        runtime.lastProgressUiAt = 0;
+        runtime.lastProgressValue = runtime.checkpoint ? task.progress : 0;
+        uploadRuntimeRef.current.set(task.id, runtime);
+
         //更新任务状态为上传中，清除错误信息
-        updateTask(task.id, { status: 'uploading', errorMessage: '' });
+        updateTask(task.id, {
+            status: 'uploading',
+            errorMessage: '',
+            progress: runtime.checkpoint ? task.progress : 0,
+        });
 
         let uploadId = task.uploadId;
         let objectKey = task.objectKey;
@@ -230,7 +542,7 @@ export default function UploadPage() {
                 const { data: initRes } = await initUpload({
                     fileName: task.fileName,
                     fileSize: task.fileSize,
-                    contentType: task.file.type || 'application/octet-stream',
+                    contentType: uploadFile.type || 'application/octet-stream',
                 });
                 if (initRes.code !== 200) {
                     updateTask(task.id, { status: 'error', errorMessage: initRes.message || '初始化上传失败' });
@@ -245,16 +557,24 @@ export default function UploadPage() {
                 updateTask(task.id, {
                     uploadId,
                     objectKey,
+                    uploadCheckpoint: runtime.checkpoint || null,
                 });
             }
 
-            const uploadResult = await uploadToOss(objectKey, task.file, (percent) => {
+            const uploadResult = await uploadToOss(task.id, objectKey, uploadFile, (percent, options = {}) => {
+                const latestRuntime = uploadRuntimeRef.current.get(task.id);
+                if (latestRuntime?.pauseRequested || latestRuntime?.removeRequested) {
+                    return;
+                }
                 const progress = Math.min(99, Math.round((percent || 0) * 100));
-                updateTask(task.id, { progress, status: 'uploading' });
+                updateTaskProgress(task.id, progress, {
+                    status: 'uploading',
+                    forcePersist: Boolean(options.shouldPersistCheckpoint),
+                });
             });
 
             // 上传成功后通知后端落库并清理上传会话。
-            updateTask(task.id, { status: 'merging' });
+            persistTaskUploadSnapshot(task.id, { progress: 99, status: 'merging' });
             const { data: completeRes } = await completeUpload({
                 uploadId,
                 objectKey,
@@ -267,7 +587,11 @@ export default function UploadPage() {
                     errorMessage: '',
                     uploadId: null,
                     objectKey: null,
+                    uploadCheckpoint: null,
+                    file: null,
                 });
+                clearTaskRuntime(task.id);
+                void removeCachedUploadFile(task.id);
                 fetchStorageSummary();
                 scheduleAutoRemoveTask(task.id);
             } else {
@@ -276,11 +600,25 @@ export default function UploadPage() {
                 updateTask(task.id, {
                     uploadId: null,
                     objectKey: null,
+                    uploadCheckpoint: null,
                     progress: 0,
                 });
+                clearTaskRuntime(task.id);
                 fetchStorageSummary();
             }
         } catch (err) {
+            const latestRuntime = uploadRuntimeRef.current.get(task.id);
+            if (isUploadCanceled(task.id, err)) {
+                if (!latestRuntime?.removeRequested) {
+                    persistTaskUploadSnapshot(task.id, {
+                        status: 'paused',
+                        errorMessage: '',
+                    });
+                }
+                fetchStorageSummary();
+                return;
+            }
+
             await releaseFailedUploadSession(uploadId);
             if (isStsExpiredError(err)) {
                 stsCacheRef.current = null;
@@ -289,8 +627,10 @@ export default function UploadPage() {
             updateTask(task.id, {
                 uploadId: null,
                 objectKey: null,
+                uploadCheckpoint: null,
                 progress: 0,
             });
+            clearTaskRuntime(task.id);
             fetchStorageSummary();
         } finally {
             runningTaskIdsRef.current.delete(task.id);
@@ -325,7 +665,7 @@ export default function UploadPage() {
     //开始批量上传，内部会自动跳过已完成的任务
     const startAllUploads = () => {
         //获取当前所有任务的快照，筛选出待上传或失败状态任务进行上传
-        const toUpload = getTasksSnapshot().filter((t) => t.status === 'pending' || t.status === 'error');
+        const toUpload = getTasksSnapshot().filter((t) => t.status === 'pending' || t.status === 'paused' || t.status === 'error');
 
         if (toUpload.length === 0) {
             message.info('没有可开始的上传任务');
@@ -358,9 +698,19 @@ export default function UploadPage() {
 
 
     // 移除任务，如果正在上传则尝试取消服务端上传会话
-    const removeTask = async (taskId) => {
+    const removeTask = (taskId) => {
         const task = tasksRef.current.find((t) => t.id === taskId);
         if (!task) return;
+
+        const runtime = uploadRuntimeRef.current.get(taskId);
+        if (runtime) {
+            runtime.removeRequested = true;
+            runtime.cancelRequested = true;
+            uploadRuntimeRef.current.set(taskId, runtime);
+            if (runtime.client && typeof runtime.client.cancel === 'function') {
+                runtime.client.cancel();
+            }
+        }
 
         const timerId = finishedCleanupTimersRef.current.get(taskId);
         if (timerId) {
@@ -368,16 +718,51 @@ export default function UploadPage() {
             finishedCleanupTimersRef.current.delete(taskId);
         }
 
+        dispatch(removeTaskById(taskId));
+        clearTaskRuntime(taskId);
+        void removeCachedUploadFile(taskId);
+
         if (task.uploadId && task.status !== 'done') {
-            try {
-                await cancelUploadSession(task.uploadId);
-                fetchStorageSummary();
-            } catch {
-                message.warning('上传任务已移除，但服务端上传会话清理可能失败');
-            }
+            void cancelUploadSession(task.uploadId)
+                .then(() => {
+                    fetchStorageSummary();
+                })
+                .catch(() => {
+                    message.warning('上传任务已移除，但服务端上传会话清理可能失败');
+                });
+        }
+    };
+
+    const pauseTask = (taskId) => {
+        const task = tasksRef.current.find((t) => t.id === taskId);
+        if (!task) {
+            return;
+        }
+        if (task.status === 'pending' || task.status === 'error') {
+            updateTask(taskId, { status: 'paused', errorMessage: '' });
+            return;
+        }
+        if (task.status !== 'uploading') {
+            return;
         }
 
-        dispatch(removeTaskById(taskId));
+        const runtime = uploadRuntimeRef.current.get(taskId) || {};
+        runtime.pauseRequested = true;
+        runtime.cancelRequested = true;
+        uploadRuntimeRef.current.set(taskId, runtime);
+        updateTask(taskId, { status: 'paused', errorMessage: '' });
+        if (runtime.client && typeof runtime.client.cancel === 'function') {
+            runtime.client.cancel();
+        }
+    };
+
+    const resumeTask = async (taskId) => {
+        const task = tasksRef.current.find((t) => t.id === taskId);
+        if (!task) {
+            return;
+        }
+        updateTask(taskId, { status: 'pending', errorMessage: '' });
+        await uploadSingleTask({ ...task, status: 'pending' });
     };
 
     const retryTask = async (taskId) => {
@@ -388,11 +773,14 @@ export default function UploadPage() {
     };
 
     const handleClearDoneTasks = () => {
+        const doneTaskIds = tasksRef.current.filter((task) => task.status === 'done').map((task) => task.id);
+        void removeCachedUploadFiles(doneTaskIds);
         dispatch(clearDoneTasksAction());
     };
 
     const statusTag = {
         pending: <Tag>等待上传</Tag>,
+        paused: <Tag color="warning">已暂停</Tag>,
         uploading: <Tag color="processing">上传中</Tag>,
         merging: <Tag color="processing">处理中</Tag>,
         done: <Tag color="success">上传完成</Tag>,
@@ -422,7 +810,10 @@ export default function UploadPage() {
                     </Space>
                     <Progress percent={storageUsagePercent} showInfo={false} />
                     <Typography.Text type="secondary">
-                        已用 {formatBytes(storageReservedBytes)}（含上传占用 {formatBytes(storagePendingBytes)}） / 总配额 {formatBytes(storageQuotaBytes)}，剩余 {formatBytes(storageRemainingBytes)}
+                        实际已用 {formatBytes(storageUsedBytes)} / 总配额 {formatBytes(storageQuotaBytes)}，剩余 {formatBytes(storageRemainingBytes)}
+                    </Typography.Text>
+                    <Typography.Text type="secondary">
+                        上传预占 {formatBytes(storagePendingBytes)}，预占后预计占用 {formatBytes(storageReservedBytes)}（{storageReservedPercent}%），预占后剩余 {formatBytes(storageReservedRemainingBytes)}
                     </Typography.Text>
                     <Typography.Text type="secondary">
                         当前任务累计大小：{formatBytes(waitingBytes)}
@@ -437,7 +828,7 @@ export default function UploadPage() {
                             <InboxOutlined style={{ color: 'var(--ol-primary)' }} />
                             <Typography.Text strong>选择要上传的文件（可多选）</Typography.Text>
                         </Space>
-                        <Typography.Text type="secondary">直传OSS分片大小 5MB</Typography.Text>
+                        <Typography.Text type="secondary">直传OSS分片大小自适应，12MB-24MB；1GB以上自动降并发并放宽超时</Typography.Text>
                         <Space>
 
                             {/* 文件选择框 */}
@@ -469,39 +860,7 @@ export default function UploadPage() {
                     dataSource={tasks}
                     locale={{ emptyText: '暂无上传任务' }}
                     renderItem={(task) => (
-                        <List.Item
-                            actions={[
-                                task.status === 'error' ? (
-                                    <Button
-                                        key="retry"
-                                        size="small"
-                                        icon={<ReloadOutlined />}
-                                        onClick={() => retryTask(task.id)}
-                                    >
-                                        重试
-                                    </Button>
-                                ) : null,
-                                (task.status === 'pending' || task.status === 'error') ? (
-                                    <Button
-                                        key="rename"
-                                        size="small"
-                                        icon={<EditOutlined />}
-                                        onClick={() => openRenameTaskModal(task)}
-                                    >
-                                        重命名
-                                    </Button>
-                                ) : null,
-                                <Button
-                                    key="remove"
-                                    size="small"
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => removeTask(task.id)}
-                                    disabled={task.status === 'uploading' || task.status === 'merging'}
-                                >
-                                    移除
-                                </Button>,
-                            ].filter(Boolean)}
-                        >
+                        <List.Item>
                             <div style={{ width: '100%' }}>
                                 <Space style={{ width: '100%', justifyContent: 'space-between' }}>
                                     <Typography.Text strong>{task.fileName}</Typography.Text>
@@ -513,9 +872,63 @@ export default function UploadPage() {
                                     status={task.status === 'error' ? 'exception' : task.status === 'done' ? 'success' : 'active'}
                                     style={{ marginTop: 6 }}
                                 />
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                    {getTaskProgressText(task)}
+                                </Typography.Text>
                                 {task.errorMessage && (
                                     <Typography.Text type="danger" style={{ fontSize: 12 }}>{task.errorMessage}</Typography.Text>
                                 )}
+                                <Space wrap style={{ marginTop: 8 }}>
+                                    {task.status === 'uploading' && (
+                                        <Button
+                                            key="pause"
+                                            size="small"
+                                            icon={<PauseOutlined />}
+                                            onClick={() => pauseTask(task.id)}
+                                        >
+                                            暂停
+                                        </Button>
+                                    )}
+                                    {task.status === 'paused' && (
+                                        <Button
+                                            key="resume"
+                                            size="small"
+                                            icon={<CaretRightOutlined />}
+                                            onClick={() => resumeTask(task.id)}
+                                        >
+                                            继续
+                                        </Button>
+                                    )}
+                                    {task.status === 'error' && (
+                                        <Button
+                                            key="retry"
+                                            size="small"
+                                            icon={<ReloadOutlined />}
+                                            onClick={() => retryTask(task.id)}
+                                        >
+                                            重试
+                                        </Button>
+                                    )}
+                                    {(task.status === 'pending' || task.status === 'error') && (
+                                        <Button
+                                            key="rename"
+                                            size="small"
+                                            icon={<EditOutlined />}
+                                            onClick={() => openRenameTaskModal(task)}
+                                        >
+                                            重命名
+                                        </Button>
+                                    )}
+                                    <Button
+                                        key="remove"
+                                        size="small"
+                                        icon={<DeleteOutlined />}
+                                        onClick={() => removeTask(task.id)}
+                                        disabled={task.status === 'merging'}
+                                    >
+                                        删除
+                                    </Button>
+                                </Space>
                             </div>
                         </List.Item>
                     )}

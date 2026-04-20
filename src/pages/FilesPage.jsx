@@ -1191,8 +1191,10 @@ export default function FilesPage() {
     const storagePendingBytes = storageSummary?.pendingBytes || 0;
     const storageReservedBytes = storageSummary?.reservedUsedBytes || storageUsedBytes;
     const storageQuotaBytes = storageSummary?.quotaBytes || 0;
-    const storageRemainingBytes = storageSummary?.remainingBytes || 0;
-    const storageUsagePercent = storageSummary?.usagePercent || 0;
+    const storageRemainingBytes = storageSummary?.remainingBytes ?? Math.max(0, storageQuotaBytes - storageUsedBytes);
+    const storageReservedRemainingBytes = storageSummary?.reservedRemainingBytes ?? Math.max(0, storageQuotaBytes - storageReservedBytes);
+    const storageUsagePercent = storageSummary?.usagePercent ?? (storageQuotaBytes <= 0 ? 0 : Math.min(100, Math.round((storageUsedBytes * 100) / storageQuotaBytes)));
+    const storageReservedPercent = storageSummary?.reservedUsagePercent ?? (storageQuotaBytes <= 0 ? 0 : Math.min(100, Math.round((storageReservedBytes * 100) / storageQuotaBytes)));
 
     const fileColumns = [
         {
@@ -1302,7 +1304,10 @@ export default function FilesPage() {
                             </Space>
                             <Progress percent={storageUsagePercent} showInfo={false} />
                             <Typography.Text type="secondary">
-                                已用 {formatBytes(storageReservedBytes)}（含上传占用 {formatBytes(storagePendingBytes)}） / 总配额 {formatBytes(storageQuotaBytes)}，剩余 {formatBytes(storageRemainingBytes)}
+                                实际已用 {formatBytes(storageUsedBytes)} / 总配额 {formatBytes(storageQuotaBytes)}，剩余 {formatBytes(storageRemainingBytes)}
+                            </Typography.Text>
+                            <Typography.Text type="secondary">
+                                上传预占 {formatBytes(storagePendingBytes)}，预占后预计占用 {formatBytes(storageReservedBytes)}（{storageReservedPercent}%），预占后剩余 {formatBytes(storageReservedRemainingBytes)}
                             </Typography.Text>
                         </Space>
                     </Card>
