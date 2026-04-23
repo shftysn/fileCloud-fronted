@@ -948,13 +948,15 @@ export default function UploadPage() {
                     dataSource={tasks}
                     locale={{ emptyText: '暂无上传任务' }}
                     renderItem={(task) => (
-                        <List.Item>
-                            <div style={{ width: '100%' }}>
-                                <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                                    <Typography.Text strong>{task.fileName}</Typography.Text>
+                        <List.Item className="ol-upload-task-item">
+                            <div className="ol-upload-task">
+                                <div className="ol-upload-task-head">
+                                    <Typography.Text className="ol-upload-task-name" strong title={task.fileName}>
+                                        {task.fileName}
+                                    </Typography.Text>
                                     {statusTag[task.status]}
-                                </Space>
-                                <Space wrap size={6}>
+                                </div>
+                                <Space className="ol-upload-task-meta" wrap size={6}>
                                     <Typography.Text type="secondary">{(task.fileSize / 1048576).toFixed(2)} MB</Typography.Text>
                                     {task.uploadParallel > 0 && (
                                         <Tag color="blue">并发 {task.uploadParallel}</Tag>
@@ -969,13 +971,13 @@ export default function UploadPage() {
                                     format={(percent) => `${Number(percent || 0).toFixed(1)}%`}
                                     style={{ marginTop: 6 }}
                                 />
-                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                <Typography.Text className="ol-upload-task-progress-text" type="secondary">
                                     {getTaskProgressText(task)}
                                 </Typography.Text>
                                 {task.errorMessage && (
-                                    <Typography.Text type="danger" style={{ fontSize: 12 }}>{task.errorMessage}</Typography.Text>
+                                    <Typography.Text className="ol-upload-task-error" type="danger">{task.errorMessage}</Typography.Text>
                                 )}
-                                <Space wrap style={{ marginTop: 8 }}>
+                                <Space className="ol-upload-task-actions" wrap>
                                     {task.status === 'uploading' && (
                                         <Button
                                             key="pause"
