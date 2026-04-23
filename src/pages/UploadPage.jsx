@@ -8,9 +8,10 @@ import { addTasks, patchTask, patchTaskRuntime, removeTaskById, clearDoneTasks a
 import { cacheUploadFile, getCachedUploadFile, removeCachedUploadFile, removeCachedUploadFiles } from '../utils/uploadFileCache';
 
 const MB = 1024 * 1024;
-const DEFAULT_CHUNK_SIZE = 12 * MB;
+const DEFAULT_CHUNK_SIZE = 16 * MB;
 const LARGE_FILE_CHUNK_SIZE = 16 * MB;
-const HUGE_FILE_CHUNK_SIZE = 24 * MB;
+const HUGE_FILE_CHUNK_SIZE = 32 * MB;
+const GIANT_FILE_CHUNK_SIZE = 48 * MB;
 const STS_EXPIRE_AHEAD_MS = 2 * 60 * 1000;
 const PROGRESS_UPDATE_INTERVAL_MS = 400;
 const CHECKPOINT_PERSIST_INTERVAL_MS = 3000;
@@ -80,6 +81,9 @@ const isInvalidCheckpointError = (err) => {
 };
 
 const getChunkSize = (fileSize) => {
+    if (fileSize >= 10 * 1024 * MB) {
+        return GIANT_FILE_CHUNK_SIZE;
+    }
     if (fileSize >= 5 * 1024 * MB) {
         return HUGE_FILE_CHUNK_SIZE;
     }
@@ -90,8 +94,11 @@ const getChunkSize = (fileSize) => {
 };
 
 const getUploadParallel = (fileSize) => {
+    if (fileSize >= 5 * 1024 * MB) {
+        return 6;
+    }
     if (fileSize >= 1024 * MB) {
-        return 3;
+        return 5;
     }
     return 4;
 };
@@ -828,7 +835,7 @@ export default function UploadPage() {
                             <InboxOutlined style={{ color: 'var(--ol-primary)' }} />
                             <Typography.Text strong>选择要上传的文件（可多选）</Typography.Text>
                         </Space>
-                        <Typography.Text type="secondary">直传OSS分片大小自适应，12MB-24MB；1GB以上自动降并发并放宽超时</Typography.Text>
+                        <Typography.Text type="secondary">直传OSS分片大小自适应，16MB-48MB；1GB以上提高并发并放宽超时</Typography.Text>
                         <Space>
 
                             {/* 文件选择框 */}

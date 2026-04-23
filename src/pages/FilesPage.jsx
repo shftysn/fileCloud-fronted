@@ -94,6 +94,8 @@ export default function FilesPage() {
     const toolbarLeftRef = useRef(null);
     const toolbarBaseRef = useRef(null);
     const selectionActionMeasureRef = useRef(null);
+    const previewVideoRef = useRef(null);
+    const previewTextAbortRef = useRef(null);
 
     const viewPathMap = {
         '/files': VIEW_FILES,
@@ -175,7 +177,7 @@ export default function FilesPage() {
             if (data.code === 200) {
                 setFiles(data.data || []);
             }
-        } catch {
+        } catch (err) {
             message.error('获取文件列表失败');
         } finally {
             if (!silent) {
@@ -618,6 +620,15 @@ export default function FilesPage() {
     };
 
     const closePreviewModal = () => {
+        if (previewTextAbortRef.current) {
+            previewTextAbortRef.current.abort();
+            previewTextAbortRef.current = null;
+        }
+        if (previewVideoRef.current) {
+            previewVideoRef.current.pause();
+            previewVideoRef.current.removeAttribute('src');
+            previewVideoRef.current.load();
+        }
         setPreviewModalOpen(false);
         setPreviewLoading(false);
         setPreviewRecord(null);
@@ -662,11 +673,14 @@ export default function FilesPage() {
             }
 
             setPreviewKind('text');
-            const res = await fetch(url);
+            const abortController = new AbortController();
+            previewTextAbortRef.current = abortController;
+            const res = await fetch(url, { signal: abortController.signal });
             if (!res.ok) {
                 throw new Error('预览内容读取失败');
             }
             const text = await res.text();
+            previewTextAbortRef.current = null;
             const maxChars = 500000;
             if (text.length > maxChars) {
                 setPreviewText(text.slice(0, maxChars));
@@ -675,7 +689,10 @@ export default function FilesPage() {
                 setPreviewText(text);
             }
             setPreviewLoading(false);
-        } catch {
+        } catch (err) {
+            if (err?.name === 'AbortError') {
+                return;
+            }
             message.error('预览失败，请稍后重试');
             closePreviewModal();
         }
@@ -1546,11 +1563,12 @@ export default function FilesPage() {
                 open={previewModalOpen}
                 width={900}
                 footer={null}
+                destroyOnClose
                 onCancel={closePreviewModal}
             >
                 {previewLoading && <div>预览加载中...</div>}
                 {!previewLoading && previewKind === 'video' && (
-                    <video className="ol-preview-video" controls src={previewUrl}>
+                    <video ref={previewVideoRef} className="ol-preview-video" controls src={previewUrl}>
                         当前浏览器不支持视频播放。
                     </video>
                 )}
