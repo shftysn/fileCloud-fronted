@@ -13,7 +13,7 @@ const LARGE_FILE_CHUNK_SIZE = 16 * MB;
 const HUGE_FILE_CHUNK_SIZE = 32 * MB;
 const GIANT_FILE_CHUNK_SIZE = 48 * MB;
 const STS_EXPIRE_AHEAD_MS = 2 * 60 * 1000;
-const PROGRESS_UPDATE_INTERVAL_MS = 400;
+const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const CHECKPOINT_PERSIST_INTERVAL_MS = 3000;
 const OSS_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -95,12 +95,12 @@ const getChunkSize = (fileSize) => {
 
 const getUploadParallel = (fileSize) => {
     if (fileSize >= 5 * 1024 * MB) {
-        return 6;
+        return 10;
     }
     if (fileSize >= 1024 * MB) {
-        return 5;
+        return 8;
     }
-    return 4;
+    return 6;
 };
 
 export default function UploadPage() {
@@ -214,12 +214,40 @@ export default function UploadPage() {
 
     const formatMegabytes = (bytes) => `${(Math.max(0, bytes || 0) / MB).toFixed(2)} MB`;
 
+    const formatSpeed = (bytesPerSecond) => {
+        if (!bytesPerSecond || bytesPerSecond <= 0) {
+            return '-';
+        }
+        return `${formatBytes(bytesPerSecond)}/s`;
+    };
+
+    const formatDuration = (seconds) => {
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            return '-';
+        }
+        const totalSeconds = Math.max(0, Math.round(seconds));
+        if (totalSeconds < 60) {
+            return `${totalSeconds}s`;
+        }
+        const minutes = Math.floor(totalSeconds / 60);
+        const remainSeconds = totalSeconds % 60;
+        if (minutes < 60) {
+            return `${minutes}m ${remainSeconds}s`;
+        }
+        const hours = Math.floor(minutes / 60);
+        const remainMinutes = minutes % 60;
+        return `${hours}h ${remainMinutes}m`;
+    };
+
     const getUploadedBytes = (task) => {
         if (!task) {
             return 0;
         }
         if (task.status === 'done') {
             return task.fileSize || 0;
+        }
+        if (Number(task.uploadedBytes) > 0) {
+            return Math.min(task.fileSize || 0, Number(task.uploadedBytes));
         }
         const fileSize = task.fileSize || 0;
         return Math.min(fileSize, Math.round((Number(task.progress) || 0) * fileSize / 100));
@@ -231,7 +259,9 @@ export default function UploadPage() {
         if (task?.status === 'merging') {
             return `已上传 ${formatMegabytes(totalBytes)} / ${formatMegabytes(totalBytes)}，等待服务端确认`;
         }
-        return `已上传 ${formatMegabytes(uploadedBytes)} / ${formatMegabytes(totalBytes)}`;
+        const speedText = task?.status === 'uploading' ? `，速度 ${formatSpeed(task.uploadSpeedBps)}` : '';
+        const etaText = task?.status === 'uploading' ? `，剩余 ${formatDuration(task.uploadEtaSeconds)}` : '';
+        return `已上传 ${formatMegabytes(uploadedBytes)} / ${formatMegabytes(totalBytes)}${speedText}${etaText}`;
     };
 
     const fetchStorageSummary = async () => {
@@ -287,7 +317,7 @@ export default function UploadPage() {
     const updateTaskProgress = (taskId, progress, options = {}) => {
         const { forcePersist = false, status } = options;
         const runtime = uploadRuntimeRef.current.get(taskId) || {};
-        const nextProgress = Math.max(0, Math.min(99, progress));
+        const nextProgress = Math.max(0, Math.min(99.9, progress));
         const now = Date.now();
         const shouldRefreshUi = forcePersist
             || runtime.lastProgressValue !== nextProgress
@@ -300,6 +330,9 @@ export default function UploadPage() {
             uploadRuntimeRef.current.set(taskId, runtime);
             updateTaskRuntimeState(taskId, {
                 progress: nextProgress,
+                ...(options.uploadedBytes != null ? { uploadedBytes: options.uploadedBytes } : {}),
+                ...(options.uploadSpeedBps != null ? { uploadSpeedBps: options.uploadSpeedBps } : {}),
+                ...(options.uploadEtaSeconds != null ? { uploadEtaSeconds: options.uploadEtaSeconds } : {}),
                 ...(status ? { status } : {}),
             });
         } else {
@@ -312,6 +345,43 @@ export default function UploadPage() {
                 ...(status ? { status } : {}),
             });
         }
+    };
+
+    const updateUploadMetrics = (taskId, fileSize, percent, options = {}) => {
+        const runtime = uploadRuntimeRef.current.get(taskId) || {};
+        const now = Date.now();
+        const uploadedBytes = Math.min(fileSize, Math.max(0, Math.round((percent || 0) * fileSize)));
+
+        if (!runtime.metricStartedAt) {
+            runtime.metricStartedAt = now;
+            runtime.metricStartedBytes = uploadedBytes;
+            runtime.metricLastAt = now;
+            runtime.metricLastBytes = uploadedBytes;
+        }
+
+        const elapsedSeconds = Math.max(0.001, (now - runtime.metricStartedAt) / 1000);
+        const instantElapsedSeconds = Math.max(0.001, (now - (runtime.metricLastAt || now)) / 1000);
+        const instantDeltaBytes = Math.max(0, uploadedBytes - (runtime.metricLastBytes || 0));
+        const averageSpeed = Math.max(0, (uploadedBytes - (runtime.metricStartedBytes || 0)) / elapsedSeconds);
+        const instantSpeed = instantDeltaBytes / instantElapsedSeconds;
+        const previousSpeed = Number(runtime.smoothedSpeedBps) || 0;
+        const smoothedSpeed = previousSpeed > 0
+            ? (previousSpeed * 0.7 + instantSpeed * 0.3)
+            : (instantSpeed > 0 ? instantSpeed : averageSpeed);
+        const effectiveSpeed = smoothedSpeed > 0 ? smoothedSpeed : averageSpeed;
+        const etaSeconds = effectiveSpeed > 0 ? (fileSize - uploadedBytes) / effectiveSpeed : null;
+
+        runtime.metricLastAt = now;
+        runtime.metricLastBytes = uploadedBytes;
+        runtime.smoothedSpeedBps = effectiveSpeed;
+        uploadRuntimeRef.current.set(taskId, runtime);
+
+        updateTaskProgress(taskId, Number(((percent || 0) * 100).toFixed(1)), {
+            ...options,
+            uploadedBytes,
+            uploadSpeedBps: Math.round(effectiveSpeed),
+            uploadEtaSeconds: etaSeconds,
+        });
     };
 
     const isUploadCanceled = (taskId, err) => {
@@ -376,6 +446,10 @@ export default function UploadPage() {
                 runtime.checkpoint = normalizeUploadCheckpoint(runtime.checkpoint, file, objectKey);
                 runtime.lastPartSize = partSize;
                 uploadRuntimeRef.current.set(taskId, runtime);
+                updateTaskRuntimeState(taskId, {
+                    uploadPartSize: partSize,
+                    uploadParallel: parallel,
+                });
 
                 return await client.multipartUpload(objectKey, file, {
                     parallel,
@@ -531,6 +605,11 @@ export default function UploadPage() {
         runtime.cancelRequested = false;
         runtime.lastProgressUiAt = 0;
         runtime.lastProgressValue = runtime.checkpoint ? task.progress : 0;
+        runtime.metricStartedAt = 0;
+        runtime.metricStartedBytes = 0;
+        runtime.metricLastAt = 0;
+        runtime.metricLastBytes = 0;
+        runtime.smoothedSpeedBps = 0;
         uploadRuntimeRef.current.set(task.id, runtime);
 
         //更新任务状态为上传中，清除错误信息
@@ -538,6 +617,9 @@ export default function UploadPage() {
             status: 'uploading',
             errorMessage: '',
             progress: runtime.checkpoint ? task.progress : 0,
+            uploadSpeedBps: 0,
+            uploadEtaSeconds: null,
+            uploadedBytes: getUploadedBytes(task),
         });
 
         let uploadId = task.uploadId;
@@ -573,8 +655,7 @@ export default function UploadPage() {
                 if (latestRuntime?.pauseRequested || latestRuntime?.removeRequested) {
                     return;
                 }
-                const progress = Math.min(99, Math.round((percent || 0) * 100));
-                updateTaskProgress(task.id, progress, {
+                updateUploadMetrics(task.id, uploadFile.size || 0, percent || 0, {
                     status: 'uploading',
                     forcePersist: Boolean(options.shouldPersistCheckpoint),
                 });
@@ -835,7 +916,7 @@ export default function UploadPage() {
                             <InboxOutlined style={{ color: 'var(--ol-primary)' }} />
                             <Typography.Text strong>选择要上传的文件（可多选）</Typography.Text>
                         </Space>
-                        <Typography.Text type="secondary">直传OSS分片大小自适应，16MB-48MB；1GB以上提高并发并放宽超时</Typography.Text>
+                        <Typography.Text type="secondary">直传OSS分片大小自适应，16MB-48MB；1GB以上提高并发，进度显示实时速度与剩余时间</Typography.Text>
                         <Space>
 
                             {/* 文件选择框 */}
@@ -873,10 +954,19 @@ export default function UploadPage() {
                                     <Typography.Text strong>{task.fileName}</Typography.Text>
                                     {statusTag[task.status]}
                                 </Space>
-                                <Typography.Text type="secondary">{(task.fileSize / 1048576).toFixed(2)} MB</Typography.Text>
+                                <Space wrap size={6}>
+                                    <Typography.Text type="secondary">{(task.fileSize / 1048576).toFixed(2)} MB</Typography.Text>
+                                    {task.uploadParallel > 0 && (
+                                        <Tag color="blue">并发 {task.uploadParallel}</Tag>
+                                    )}
+                                    {task.uploadPartSize > 0 && (
+                                        <Tag color="geekblue">分片 {formatBytes(task.uploadPartSize)}</Tag>
+                                    )}
+                                </Space>
                                 <Progress
-                                    percent={task.progress}
+                                    percent={Number(task.progress || 0)}
                                     status={task.status === 'error' ? 'exception' : task.status === 'done' ? 'success' : 'active'}
+                                    format={(percent) => `${Number(percent || 0).toFixed(1)}%`}
                                     style={{ marginTop: 6 }}
                                 />
                                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
