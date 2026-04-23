@@ -25,10 +25,10 @@ import {
     listFiles,
     deleteFile,
     createFolder,
-    getDownloadUrl,
     moveFile,
     createShareLink,
     getPublicShareDownloadUrl,
+    createDownloadTicket,
     getFolderTree,
     createPreviewTicket,
     resolveApiUrl,
@@ -58,7 +58,6 @@ const STORAGE_REFRESH_DEBOUNCE_MS = 350;
 
 export default function FilesPage() {
     const location = useLocation();
-    const accessToken = useSelector((state) => state.auth.accessToken);
     const currentUser = useSelector((state) => state.auth.currentUser);
     const [activeView, setActiveView] = useState(VIEW_FILES);
     const [files, setFiles] = useState([]);
@@ -119,23 +118,6 @@ export default function FilesPage() {
         if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
         if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(2)} MB`;
         return `${(bytes / 1073741824).toFixed(2)} GB`;
-    };
-
-    const parseDownloadFileName = (res, fallbackName) => {
-        const disposition = res.headers.get('content-disposition') || '';
-        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-        if (utf8Match?.[1]) {
-            try {
-                return decodeURIComponent(utf8Match[1]);
-            } catch {
-                return utf8Match[1];
-            }
-        }
-        const basicMatch = disposition.match(/filename="?([^";]+)"?/i);
-        if (basicMatch?.[1]) {
-            return basicMatch[1];
-        }
-        return fallbackName || 'download';
     };
 
     const sleep = (ms) => new Promise((resolve) => {
@@ -568,34 +550,30 @@ export default function FilesPage() {
         handleCreateShare(selectedSingleRow);
     };
 
-    const handleDownload = (record) => {
+    const handleDownload = async (record) => {
         const fileId = record?.id;
         if (!fileId) return;
-        const a = document.createElement('a');
-        fetch(getDownloadUrl(fileId), {
-            headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
-            credentials: 'include',
-        })
-            .then(async (res) => {
-                if (res.status === 401) {
-                    forceLogoutToLogin();
-                    throw new Error('登录已过期');
-                }
-                if (!res.ok) {
-                    throw new Error('下载失败');
-                }
-                const fileName = parseDownloadFileName(res, record.fileName);
-                const blob = await res.blob();
-                return { blob, fileName };
-            })
-            .then(({ blob, fileName }) => {
-                const url = URL.createObjectURL(blob);
-                a.href = url;
-                a.download = fileName;
-                a.click();
-                URL.revokeObjectURL(url);
-            })
-            .catch(() => message.error('下载失败'));
+        try {
+            const { data } = await createDownloadTicket(fileId);
+            if (data.code !== 200 || !data.data?.downloadUrl) {
+                message.error(data.message || '生成下载链接失败');
+                return;
+            }
+            const a = document.createElement('a');
+            a.href = resolveApiUrl(data.data.downloadUrl);
+            a.download = record.fileName || 'download';
+            a.rel = 'noopener';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            message.success('已开始下载');
+        } catch (err) {
+            if (err.response?.status === 401) {
+                forceLogoutToLogin();
+                return;
+            }
+            message.error(err.response?.data?.message || '下载失败');
+        }
     };
 
     const isTextPreviewable = (contentType) => {

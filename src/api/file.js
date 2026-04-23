@@ -59,6 +59,9 @@ export const getFolderTree = () => request.get('/file/folders/tree');
 // 下载（返回 URL，由浏览器直接请求）
 export const getDownloadUrl = (fileId) => resolveApiUrl(`/api/file/download/${fileId}`);
 
+// 生成短时下载票据，用于浏览器原生下载大文件
+export const createDownloadTicket = (fileId) => request.post(`/file/download-ticket/${fileId}`);
+
 // 删除文件
 export const deleteFile = (fileId) => request.delete(`/file/${fileId}`);
 
