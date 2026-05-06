@@ -8,14 +8,16 @@ import { addTasks, patchTask, patchTaskRuntime, removeTaskById, clearDoneTasks a
 import { cacheUploadFile, getCachedUploadFile, removeCachedUploadFile, removeCachedUploadFiles } from '../utils/uploadFileCache';
 
 const MB = 1024 * 1024;
-const DEFAULT_CHUNK_SIZE = 16 * MB;
+const DEFAULT_CHUNK_SIZE = 8 * MB;
 const LARGE_FILE_CHUNK_SIZE = 16 * MB;
-const HUGE_FILE_CHUNK_SIZE = 32 * MB;
-const GIANT_FILE_CHUNK_SIZE = 48 * MB;
+const HUGE_FILE_CHUNK_SIZE = 24 * MB;
+const GIANT_FILE_CHUNK_SIZE = 32 * MB;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const STS_REFRESH_BUFFER_MS = 2 * 60 * 1000;
 const OSS_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
-const OSS_UPLOAD_PARALLEL = 4;
+const DEFAULT_UPLOAD_PARALLEL = 6;
+const LARGE_FILE_UPLOAD_PARALLEL = 8;
+const HUGE_FILE_UPLOAD_PARALLEL = 10;
 
 let ossCtorPromise = null;
 
@@ -80,6 +82,16 @@ const getChunkSize = (fileSize) => {
         return LARGE_FILE_CHUNK_SIZE;
     }
     return DEFAULT_CHUNK_SIZE;
+};
+
+const getUploadParallel = (fileSize) => {
+    if (fileSize >= 5 * 1024 * MB) {
+        return HUGE_FILE_UPLOAD_PARALLEL;
+    }
+    if (fileSize >= 1024 * MB) {
+        return LARGE_FILE_UPLOAD_PARALLEL;
+    }
+    return DEFAULT_UPLOAD_PARALLEL;
 };
 
 const getExpirationTime = (expiration) => {
@@ -439,14 +451,16 @@ export default function UploadPage() {
         const checkpoint = normalizeUploadCheckpoint(runtime.checkpoint, file)
             || null;
         const client = await createOssClient();
+        const partSize = checkpoint?.partSize || getChunkSize(file.size || 0);
+        const parallel = getUploadParallel(file.size || 0);
         runtime.ossClient = client;
         runtime.checkpoint = checkpoint;
         uploadRuntimeRef.current.set(taskId, runtime);
 
         const result = await client.multipartUpload(objectKey, file, {
             checkpoint,
-            parallel: OSS_UPLOAD_PARALLEL,
-            partSize: getChunkSize(file.size || 0),
+            parallel,
+            partSize,
             progress: async (percent, nextCheckpoint) => {
                 const latestRuntime = uploadRuntimeRef.current.get(taskId) || {};
                 if (latestRuntime.pauseRequested || latestRuntime.removeRequested || latestRuntime.cancelRequested) {
@@ -651,7 +665,7 @@ export default function UploadPage() {
 
             updateTaskRuntimeState(task.id, {
                 uploadPartSize: runtime.checkpoint?.partSize || getChunkSize(uploadFile.size || 0),
-                uploadParallel: OSS_UPLOAD_PARALLEL,
+                uploadParallel: getUploadParallel(uploadFile.size || 0),
             });
 
             const initialUploadedBytes = getUploadedBytesFromCheckpoint(uploadFile.size || 0, runtime.checkpoint);
