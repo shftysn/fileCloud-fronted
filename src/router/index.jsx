@@ -10,6 +10,7 @@ const FilesPage = lazy(() => import('../pages/FilesPage'));
 const UploadPage = lazy(() => import('../pages/UploadPage'));
 const NoticeCenterPage = lazy(() => import('../pages/NoticeCenterPage'));
 const AdminPage = lazy(() => import('../pages/AdminPage'));
+const AdminSystemInfoPage = lazy(() => import('../pages/AdminSystemInfoPage'));
 const AdminNoticePage = lazy(() => import('../pages/AdminNoticePage'));
 const MainLayout = lazy(() => import('../layouts/MainLayout'));
 const ErrorPage = lazy(() => import('../pages/ErrorPage'));
@@ -70,13 +71,21 @@ export const router = createBrowserRouter([
             },
             {
                 path: 'admin',
-                element: <Navigate to="/admin/users" replace />,
+                element: <Navigate to="/admin/system-info" replace />,
             },
             {
                 path: 'admin/users',
                 element: (
                     <AdminRoute>
                         <AdminPage />
+                    </AdminRoute>
+                ),
+            },
+            {
+                path: 'admin/system-info',
+                element: (
+                    <AdminRoute>
+                        <AdminSystemInfoPage />
                     </AdminRoute>
                 ),
             },

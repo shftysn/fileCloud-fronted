@@ -12,10 +12,19 @@ const DEFAULT_CHUNK_SIZE = 16 * MB;
 const LARGE_FILE_CHUNK_SIZE = 16 * MB;
 const HUGE_FILE_CHUNK_SIZE = 32 * MB;
 const GIANT_FILE_CHUNK_SIZE = 48 * MB;
-const STS_EXPIRE_AHEAD_MS = 2 * 60 * 1000;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
-const CHECKPOINT_PERSIST_INTERVAL_MS = 3000;
-const OSS_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const STS_REFRESH_BUFFER_MS = 2 * 60 * 1000;
+const OSS_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const OSS_UPLOAD_PARALLEL = 4;
+
+let ossCtorPromise = null;
+
+const getOssCtor = async () => {
+    if (!ossCtorPromise) {
+        ossCtorPromise = import('ali-oss').then((mod) => mod.default || mod);
+    }
+    return ossCtorPromise;
+};
 
 const getFileFingerprint = (fileOrTask) => {
     if (!fileOrTask) {
@@ -42,42 +51,22 @@ const toPlainJson = (value) => {
     }
 };
 
-const normalizeCheckpointArray = (value) => {
-    if (!Array.isArray(value)) {
-        return [];
-    }
-    return value.map((item) => toPlainJson(item));
-};
-
-const normalizeUploadCheckpoint = (checkpoint, file, objectKey) => {
+const normalizeUploadCheckpoint = (checkpoint, file) => {
     const plain = toPlainJson(checkpoint);
     if (!plain || typeof plain !== 'object') {
-        return null;
-    }
-    const expectedPartSize = getChunkSize(file?.size || Number(plain.fileSize) || 0);
-
-    if (objectKey && plain.name && plain.name !== objectKey) {
         return null;
     }
     if (file?.size > 0 && Number(plain.fileSize) > 0 && Number(plain.fileSize) !== Number(file.size)) {
         return null;
     }
-    if (Number(plain.partSize) > 0 && Number(plain.partSize) !== expectedPartSize) {
+    if (!plain.uploadId || !plain.name) {
         return null;
     }
-
     return {
         ...plain,
         fileSize: Number(plain.fileSize) > 0 ? Number(plain.fileSize) : (file?.size || 0),
-        partSize: expectedPartSize,
-        doneParts: normalizeCheckpointArray(plain.doneParts),
+        doneParts: Array.isArray(plain.doneParts) ? plain.doneParts : [],
     };
-};
-
-const isInvalidCheckpointError = (err) => {
-    const message = String(err?.message || '').toLowerCase();
-    return message.includes('non-writable length')
-        || message.includes("can't define array index property past the end of an array");
 };
 
 const getChunkSize = (fileSize) => {
@@ -93,14 +82,12 @@ const getChunkSize = (fileSize) => {
     return DEFAULT_CHUNK_SIZE;
 };
 
-const getUploadParallel = (fileSize) => {
-    if (fileSize >= 5 * 1024 * MB) {
-        return 10;
+const getExpirationTime = (expiration) => {
+    if (!expiration) {
+        return 0;
     }
-    if (fileSize >= 1024 * MB) {
-        return 8;
-    }
-    return 6;
+    const time = new Date(expiration).getTime();
+    return Number.isFinite(time) ? time : 0;
 };
 
 export default function UploadPage() {
@@ -119,8 +106,8 @@ export default function UploadPage() {
     const runningTaskIdsRef = useRef(new Set());
     const finishedCleanupTimersRef = useRef(new Map());
     const uploadRuntimeRef = useRef(new Map());
-    const stsCacheRef = useRef(null);
     const restoringTaskIdsRef = useRef(new Set());
+    const stsCacheRef = useRef(null);
 
     useEffect(() => {
         tasksRef.current = tasks;
@@ -134,7 +121,7 @@ export default function UploadPage() {
 
             const runtime = uploadRuntimeRef.current.get(task.id) || {};
             if (!runtime.checkpoint && task.uploadCheckpoint) {
-                runtime.checkpoint = normalizeUploadCheckpoint(task.uploadCheckpoint, task.file, task.objectKey);
+                runtime.checkpoint = normalizeUploadCheckpoint(task.uploadCheckpoint, task.file);
                 uploadRuntimeRef.current.set(task.id, runtime);
                 return;
             }
@@ -275,17 +262,6 @@ export default function UploadPage() {
         }
     };
 
-    const releaseFailedUploadSession = async (uploadId) => {
-        if (!uploadId) {
-            return;
-        }
-        try {
-            await cancelUploadSession(uploadId);
-        } catch {
-            // ignore release failures to avoid masking original upload error
-        }
-    };
-
     const getTasksSnapshot = () => store.getState().upload.tasks;
 
     const scheduleAutoRemoveTask = (taskId, delayMs = 2000) => {
@@ -390,104 +366,124 @@ export default function UploadPage() {
             return true;
         }
         const name = String(err?.name || '').toLowerCase();
-        if (name === 'cancel' || name === 'abort') {
+        const code = String(err?.code || '').toLowerCase();
+        if (name === 'cancel' || name === 'abort' || name === 'cancelederror' || code === 'err_canceled') {
             return true;
-        }
-        const client = runtime?.client;
-        if (client && typeof client.isCancel === 'function') {
-            return client.isCancel();
         }
         return false;
     };
 
-    const getStsPayload = async (forceRefresh = false) => {
+    const createCheckpoint = (checkpoint, file) => {
+        const plain = toPlainJson(checkpoint);
+        if (!plain || typeof plain !== 'object') {
+            return null;
+        }
+        delete plain.file;
+        plain.fileSize = file?.size || Number(plain.fileSize) || 0;
+        plain.doneParts = Array.isArray(plain.doneParts) ? plain.doneParts : [];
+        return plain;
+    };
+
+    const getUploadedBytesFromCheckpoint = (fileSize, checkpoint) => {
+        if (!checkpoint) {
+            return 0;
+        }
+        const doneParts = Array.isArray(checkpoint.doneParts) ? checkpoint.doneParts.length : 0;
+        const partSize = Number(checkpoint.partSize) > 0 ? Number(checkpoint.partSize) : getChunkSize(fileSize || 0);
+        return Math.min(fileSize || 0, doneParts * partSize);
+    };
+
+    const getValidSts = async () => {
         const cached = stsCacheRef.current;
-        const now = Date.now();
-        if (!forceRefresh && cached && cached.expireAt - now > STS_EXPIRE_AHEAD_MS) {
-            return cached.payload;
+        if (cached?.expirationTime && cached.expirationTime - Date.now() > STS_REFRESH_BUFFER_MS) {
+            return cached;
         }
-
-        //获取oss临时凭证，成功后缓存并返回，失败则抛出错误
-        const { data } = await getOssSts();
-        if (data.code !== 200 || !data.data) {
-            throw new Error(data.message || '获取STS临时凭证失败');
+        const { data: stsRes } = await getOssSts();
+        if (stsRes.code !== 200 || !stsRes.data) {
+            throw new Error(stsRes.message || '获取 OSS 临时凭证失败');
         }
-        const payload = data.data;
-        const expiration = payload.expiration ? new Date(payload.expiration).getTime() : (now + 45 * 60 * 1000);
-        const safeExpiration = Number.isFinite(expiration) ? expiration : (now + 45 * 60 * 1000);
-        stsCacheRef.current = { payload, expireAt: safeExpiration };
-        return payload;
+        const next = {
+            ...stsRes.data,
+            expirationTime: getExpirationTime(stsRes.data.expiration),
+        };
+        stsCacheRef.current = next;
+        return next;
     };
 
-    const isStsExpiredError = (err) => {
-        const code = String(err?.code || '').toLowerCase();
-        return code.includes('securitytoken') || code.includes('invalidaccesskeyid');
+    const createOssClient = async () => {
+        const OSS = await getOssCtor();
+        const sts = await getValidSts();
+        return new OSS({
+            accessKeyId: sts.accessKeyId,
+            accessKeySecret: sts.accessKeySecret,
+            stsToken: sts.securityToken,
+            bucket: sts.bucket,
+            region: sts.region,
+            endpoint: sts.endpoint,
+            secure: true,
+            timeout: OSS_UPLOAD_TIMEOUT_MS,
+            refreshSTSToken: async () => {
+                const refreshed = await getValidSts();
+                return {
+                    accessKeyId: refreshed.accessKeyId,
+                    accessKeySecret: refreshed.accessKeySecret,
+                    stsToken: refreshed.securityToken,
+                };
+            },
+            refreshSTSTokenInterval: Math.max(60000, STS_REFRESH_BUFFER_MS),
+        });
     };
 
-    const uploadToOss = async (taskId, objectKey, file, onProgress) => {
-        const partSize = getChunkSize(file.size || 0);
-        const parallel = getUploadParallel(file.size || 0);
-        for (let attempt = 0; attempt < 3; attempt++) {
+    const uploadFileToOss = async (taskId, file, objectKey, onProgress) => {
+        const runtime = uploadRuntimeRef.current.get(taskId) || {};
+        const checkpoint = normalizeUploadCheckpoint(runtime.checkpoint, file)
+            || null;
+        const client = await createOssClient();
+        runtime.ossClient = client;
+        runtime.checkpoint = checkpoint;
+        uploadRuntimeRef.current.set(taskId, runtime);
+
+        const result = await client.multipartUpload(objectKey, file, {
+            checkpoint,
+            parallel: OSS_UPLOAD_PARALLEL,
+            partSize: getChunkSize(file.size || 0),
+            progress: async (percent, nextCheckpoint) => {
+                const latestRuntime = uploadRuntimeRef.current.get(taskId) || {};
+                if (latestRuntime.pauseRequested || latestRuntime.removeRequested || latestRuntime.cancelRequested) {
+                    client.cancel();
+                    return;
+                }
+                latestRuntime.checkpoint = createCheckpoint(nextCheckpoint, file);
+                latestRuntime.lastCheckpointPersistAt = Date.now();
+                uploadRuntimeRef.current.set(taskId, latestRuntime);
+                if (typeof onProgress === 'function') {
+                    onProgress(percent, latestRuntime.checkpoint);
+                }
+            },
+        });
+        const latestRuntime = uploadRuntimeRef.current.get(taskId) || runtime;
+        latestRuntime.checkpoint = null;
+        uploadRuntimeRef.current.set(taskId, latestRuntime);
+        return result;
+    };
+
+    const abortOssUploadIfNeeded = async (taskId, options = {}) => {
+        const runtime = uploadRuntimeRef.current.get(taskId) || {};
+        const client = runtime.ossClient;
+        const checkpoint = runtime.checkpoint;
+        if (client?.cancel) {
+            client.cancel();
+        }
+        if (options.abortRemote && client?.abortMultipartUpload && checkpoint?.name && checkpoint?.uploadId) {
+            const latestRuntime = uploadRuntimeRef.current.get(taskId) || {};
             try {
-                const sts = await getStsPayload(attempt > 0);
-                const { default: OSS } = await import('ali-oss');
-                const client = new OSS({
-                    region: sts.region,
-                    bucket: sts.bucket,
-                    endpoint: sts.endpoint,
-                    accessKeyId: sts.accessKeyId,
-                    accessKeySecret: sts.accessKeySecret,
-                    stsToken: sts.securityToken,
-                    timeout: OSS_REQUEST_TIMEOUT_MS,
-                });
-
-                const runtime = uploadRuntimeRef.current.get(taskId) || {};
-                runtime.client = client;
-                runtime.checkpoint = normalizeUploadCheckpoint(runtime.checkpoint, file, objectKey);
-                runtime.lastPartSize = partSize;
-                uploadRuntimeRef.current.set(taskId, runtime);
-                updateTaskRuntimeState(taskId, {
-                    uploadPartSize: partSize,
-                    uploadParallel: parallel,
-                });
-
-                return await client.multipartUpload(objectKey, file, {
-                    parallel,
-                    partSize,
-                    mime: file.type || 'application/octet-stream',
-                    checkpoint: runtime.checkpoint,
-                    progress: async (percent, checkpoint) => {
-                        const latestRuntime = uploadRuntimeRef.current.get(taskId) || {};
-                        latestRuntime.checkpoint = normalizeUploadCheckpoint(checkpoint, file, objectKey);
-                        latestRuntime.lastPartSize = partSize;
-                        uploadRuntimeRef.current.set(taskId, latestRuntime);
-                        if (typeof onProgress === 'function') {
-                            const now = Date.now();
-                            const shouldPersistCheckpoint = percent >= 1
-                                || !latestRuntime.lastCheckpointPersistAt
-                                || (now - latestRuntime.lastCheckpointPersistAt >= CHECKPOINT_PERSIST_INTERVAL_MS);
-                            onProgress(percent, { shouldPersistCheckpoint });
-                        }
-                    },
-                });
-            } catch (err) {
-                if (attempt === 0 && isStsExpiredError(err)) {
-                    stsCacheRef.current = null;
-                    continue;
+                await client.abortMultipartUpload(checkpoint.name, checkpoint.uploadId);
+            } catch {
+                if (!latestRuntime.removeRequested) {
+                    throw new Error('服务端分片清理失败');
                 }
-                if (isInvalidCheckpointError(err)) {
-                    const runtime = uploadRuntimeRef.current.get(taskId) || {};
-                    runtime.checkpoint = null;
-                    uploadRuntimeRef.current.set(taskId, runtime);
-                    persistTaskUploadSnapshot(taskId, { progress: 0 });
-                    if (attempt < 2) {
-                        continue;
-                    }
-                }
-                throw err;
             }
         }
-        throw new Error('OSS上传失败');
     };
 
 
@@ -558,6 +554,7 @@ export default function UploadPage() {
                 errorMessage: '',
                 uploadId: null,
                 objectKey: null,
+                totalChunks: null,
                 uploadCheckpoint: null,
             });
             void cacheUploadFile(fingerprint, file);
@@ -619,14 +616,13 @@ export default function UploadPage() {
             progress: runtime.checkpoint ? task.progress : 0,
             uploadSpeedBps: 0,
             uploadEtaSeconds: null,
-            uploadedBytes: getUploadedBytes(task),
+            uploadedBytes: getUploadedBytesFromCheckpoint(uploadFile.size || 0, runtime.checkpoint) || getUploadedBytes(task),
         });
 
         let uploadId = task.uploadId;
         let objectKey = task.objectKey;
 
         try {
-            // 没有上传会话时先初始化，服务端会返回 uploadId 与 objectKey。
             if (!uploadId || !objectKey) {
                 const { data: initRes } = await initUpload({
                     fileName: task.fileName,
@@ -639,61 +635,66 @@ export default function UploadPage() {
                 }
                 uploadId = initRes.data.uploadId;
                 objectKey = initRes.data.objectKey;
-                if (!objectKey) {
-                    throw new Error('服务端未返回OSS对象路径，无法继续上传');
-                }
+                runtime.checkpoint = null;
+                uploadRuntimeRef.current.set(task.id, runtime);
 
                 updateTask(task.id, {
                     uploadId,
                     objectKey,
-                    uploadCheckpoint: runtime.checkpoint || null,
+                    totalChunks: null,
+                    uploadCheckpoint: null,
                 });
             }
 
-            const uploadResult = await uploadToOss(task.id, objectKey, uploadFile, (percent, options = {}) => {
+            runtime.checkpoint = normalizeUploadCheckpoint(runtime.checkpoint, uploadFile) || null;
+            uploadRuntimeRef.current.set(task.id, runtime);
+
+            updateTaskRuntimeState(task.id, {
+                uploadPartSize: runtime.checkpoint?.partSize || getChunkSize(uploadFile.size || 0),
+                uploadParallel: OSS_UPLOAD_PARALLEL,
+            });
+
+            const initialUploadedBytes = getUploadedBytesFromCheckpoint(uploadFile.size || 0, runtime.checkpoint);
+            if (initialUploadedBytes > 0) {
+                updateUploadMetrics(task.id, uploadFile.size || 0, (initialUploadedBytes / (uploadFile.size || 1)) || 0, {
+                    status: 'uploading',
+                    forcePersist: true,
+                });
+            }
+
+            const uploadResult = await uploadFileToOss(task.id, uploadFile, objectKey, (percent, checkpoint) => {
                 const latestRuntime = uploadRuntimeRef.current.get(task.id);
                 if (latestRuntime?.pauseRequested || latestRuntime?.removeRequested) {
                     return;
                 }
                 updateUploadMetrics(task.id, uploadFile.size || 0, percent || 0, {
                     status: 'uploading',
-                    forcePersist: Boolean(options.shouldPersistCheckpoint),
+                    forcePersist: Boolean(checkpoint),
                 });
             });
 
-            // 上传成功后通知后端落库并清理上传会话。
             persistTaskUploadSnapshot(task.id, { progress: 99, status: 'merging' });
             const { data: completeRes } = await completeUpload({
                 uploadId,
                 objectKey,
-                etag: uploadResult?.res?.headers?.etag || uploadResult?.etag || '',
+                etag: uploadResult?.etag || '',
             });
-            if (completeRes.code === 200) {
-                updateTask(task.id, {
-                    status: 'done',
-                    progress: 100,
-                    errorMessage: '',
-                    uploadId: null,
-                    objectKey: null,
-                    uploadCheckpoint: null,
-                    file: null,
-                });
-                clearTaskRuntime(task.id);
-                void removeCachedUploadFile(task.id);
-                fetchStorageSummary();
-                scheduleAutoRemoveTask(task.id);
-            } else {
-                await releaseFailedUploadSession(uploadId);
-                updateTask(task.id, { status: 'error', errorMessage: completeRes.message || '上传完成确认失败' });
-                updateTask(task.id, {
-                    uploadId: null,
-                    objectKey: null,
-                    uploadCheckpoint: null,
-                    progress: 0,
-                });
-                clearTaskRuntime(task.id);
-                fetchStorageSummary();
+            if (completeRes.code !== 200) {
+                throw new Error(completeRes.message || '提交上传完成失败');
             }
+            updateTask(task.id, {
+                status: 'done',
+                progress: 100,
+                errorMessage: '',
+                uploadId: null,
+                objectKey: null,
+                uploadCheckpoint: null,
+                file: null,
+            });
+            clearTaskRuntime(task.id);
+            void removeCachedUploadFile(task.id);
+            fetchStorageSummary();
+            scheduleAutoRemoveTask(task.id);
         } catch (err) {
             const latestRuntime = uploadRuntimeRef.current.get(task.id);
             if (isUploadCanceled(task.id, err)) {
@@ -707,20 +708,18 @@ export default function UploadPage() {
                 return;
             }
 
-            await releaseFailedUploadSession(uploadId);
-            if (isStsExpiredError(err)) {
-                stsCacheRef.current = null;
-            }
-            updateTask(task.id, { status: 'error', errorMessage: err?.message || '上传过程出错' });
             updateTask(task.id, {
-                uploadId: null,
-                objectKey: null,
-                uploadCheckpoint: null,
-                progress: 0,
+                status: 'error',
+                errorMessage: err?.message || '上传过程出错',
+                uploadId,
+                objectKey,
+                uploadCheckpoint: latestRuntime?.checkpoint || runtime.checkpoint || null,
             });
-            clearTaskRuntime(task.id);
             fetchStorageSummary();
         } finally {
+            const latestRuntime = uploadRuntimeRef.current.get(task.id) || runtime;
+            latestRuntime.ossClient = null;
+            uploadRuntimeRef.current.set(task.id, latestRuntime);
             runningTaskIdsRef.current.delete(task.id);
         }
     };
@@ -795,9 +794,9 @@ export default function UploadPage() {
             runtime.removeRequested = true;
             runtime.cancelRequested = true;
             uploadRuntimeRef.current.set(taskId, runtime);
-            if (runtime.client && typeof runtime.client.cancel === 'function') {
-                runtime.client.cancel();
-            }
+            void abortOssUploadIfNeeded(taskId, { abortRemote: true }).catch(() => {
+                message.warning('OSS 上传取消请求已发出，但远端分片清理可能失败');
+            });
         }
 
         const timerId = finishedCleanupTimersRef.current.get(taskId);
@@ -839,9 +838,7 @@ export default function UploadPage() {
         runtime.cancelRequested = true;
         uploadRuntimeRef.current.set(taskId, runtime);
         updateTask(taskId, { status: 'paused', errorMessage: '' });
-        if (runtime.client && typeof runtime.client.cancel === 'function') {
-            runtime.client.cancel();
-        }
+        void abortOssUploadIfNeeded(taskId);
     };
 
     const resumeTask = async (taskId) => {
@@ -880,7 +877,7 @@ export default function UploadPage() {
             <div className="ol-upload-head">
                 <div>
                     <Typography.Title level={4} style={{ margin: 0 }}>上传中心</Typography.Title>
-                    <Typography.Text type="secondary">服务端签发STS，客户端直传OSS，每个文件独立进度</Typography.Text>
+                    <Typography.Text type="secondary">服务端签发临时凭证，客户端直传 OSS，上传完成后服务端校验并落库</Typography.Text>
                 </div>
                 <Space>
                     <Tag color="blue">上传中 {uploadingCount}</Tag>
@@ -916,7 +913,7 @@ export default function UploadPage() {
                             <InboxOutlined style={{ color: 'var(--ol-primary)' }} />
                             <Typography.Text strong>选择要上传的文件（可多选）</Typography.Text>
                         </Space>
-                        <Typography.Text type="secondary">直传OSS分片大小自适应，16MB-48MB；1GB以上提高并发，进度显示实时速度与剩余时间</Typography.Text>
+                        <Typography.Text type="secondary">本地分片上传大小自适应，16MB-48MB；支持暂停、继续和断点续传</Typography.Text>
                         <Space>
 
                             {/* 文件选择框 */}

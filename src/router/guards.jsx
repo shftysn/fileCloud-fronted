@@ -16,7 +16,7 @@ export function HomeRedirect() {
         return <Navigate to="/login" replace />;
     }
 
-    return <Navigate to={isAdmin ? "/admin/users" : "/files"} replace />;
+    return <Navigate to={isAdmin ? "/admin/system-info" : "/files"} replace />;
 }
 
 export function AdminRoute({ children }) {
@@ -40,5 +40,5 @@ export function UserRoute({ children }) {
         return <Navigate to="/login" replace />;
     }
 
-    return isAdmin ? <Navigate to="/admin/users" replace /> : children;
+    return isAdmin ? <Navigate to="/admin/system-info" replace /> : children;
 }

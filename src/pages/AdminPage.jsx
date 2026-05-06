@@ -3,11 +3,11 @@ import {
   Alert,
   Button,
   Card,
-  Descriptions,
   Input,
   Modal,
   Popconfirm,
   Space,
+  Flex,
   Switch,
   Table,
   Tag,
@@ -33,6 +33,7 @@ export default function AdminPage() {
 
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [searchKeyword, setSearchKeyword] = useState('');
 
   const [actionModalOpen, setActionModalOpen] = useState(false);
   const [actionSubmitting, setActionSubmitting] = useState(false);
@@ -53,6 +54,16 @@ export default function AdminPage() {
     const roles = currentUser?.roles || [];
     return Array.isArray(roles) && roles.includes('ADMIN');
   }, [currentUser]);
+
+  const filteredUsers = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase();
+    if (!keyword) {
+      return users;
+    }
+    return users.filter((user) => {
+      return String(user.username || '').toLowerCase().includes(keyword);
+    });
+  }, [searchKeyword, users]);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -281,18 +292,6 @@ export default function AdminPage() {
       </div>
 
       <div className="ol-admin-grid">
-        <Card title="系统信息" className="ol-card-surface">
-          <Descriptions column={1} size="small">
-            <Descriptions.Item label="系统名称">分布式网盘系统</Descriptions.Item>
-            <Descriptions.Item label="后端框架">Spring Cloud Alibaba</Descriptions.Item>
-            <Descriptions.Item label="前端框架">React 18 + Ant Design 5 + Vite</Descriptions.Item>
-            <Descriptions.Item label="数据库">MySQL 8</Descriptions.Item>
-            <Descriptions.Item label="缓存">Redis</Descriptions.Item>
-            <Descriptions.Item label="消息队列">RabbitMQ</Descriptions.Item>
-            <Descriptions.Item label="安全">Spring Security + OAuth2 + JWT</Descriptions.Item>
-          </Descriptions>
-        </Card>
-
         <Card title="功能说明" className="ol-card-surface">
           <Space direction="vertical" size={6}>
             <Typography.Text>用户管理：新增用户、删除普通用户、启用/禁用用户。</Typography.Text>
@@ -303,7 +302,26 @@ export default function AdminPage() {
         </Card>
       </div>
 
-      <Card title="用户管理" className="ol-card-surface">
+      <Card
+        title="用户管理"
+        extra={
+          isAdmin ? (
+            <Flex gap={8} align="center">
+              <Input
+                allowClear
+                placeholder="请输入用户名"
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                style={{ width: 240 }}
+              />
+              <Typography.Text type="secondary">
+                共 {filteredUsers.length} 条
+              </Typography.Text>
+            </Flex>
+          ) : null
+        }
+        className="ol-card-surface"
+      >
         {!isAdmin ? (
           <Alert type="warning" showIcon message="当前账号不是 ADMIN，无法使用用户管理接口" />
         ) : (
@@ -312,7 +330,7 @@ export default function AdminPage() {
               rowKey="id"
               loading={loading}
               columns={columns}
-              dataSource={users}
+              dataSource={filteredUsers}
               pagination={{ pageSize: 10, showSizeChanger: false }}
             />
           </div>

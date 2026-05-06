@@ -41,8 +41,23 @@ export const initUpload = (data) => request.post('/file/upload/init', data);
 // 获取 OSS STS 临时凭证
 export const getOssSts = () => request.get('/file/oss/sts');
 
-// 客户端直传完成后回调服务端落库
+// 客户端直传 OSS 完成后通知服务端落库
 export const completeUpload = (data) => request.post('/file/upload/complete', data);
+
+// 上传单个分片到本地存储
+export const uploadChunk = (uploadId, chunkIndex, formData, config = {}) =>
+  request.post('/file/upload/chunk', formData, {
+    params: { uploadId, chunkIndex },
+    headers: { 'Content-Type': 'multipart/form-data' },
+    ...config,
+  });
+
+// 触发服务端合并分片
+export const mergeUpload = (uploadId) => request.post('/file/upload/merge', null, { params: { uploadId } });
+
+// 查询服务端合并状态
+export const getMergeStatus = (uploadId) =>
+  request.get('/file/upload/merge/status', { params: { uploadId } });
 
 // 存储空间摘要
 export const getStorageSummary = () => request.get('/file/storage/summary');

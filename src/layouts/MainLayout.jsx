@@ -39,6 +39,7 @@ export default function MainLayout() {
     '/upload': { title: '上传中心', sub: '分片上传与断点续传' },
     '/notices': { title: '通知中心', sub: '未读优先、已读归档的收件箱式通知阅读' },
     '/admin/users': { title: '管理员功能 - 用户管理', sub: '管理员用户状态管理与权限检查' },
+    '/admin/system-info': { title: '管理员功能 - 系统信息', sub: '查看系统基础架构与技术栈信息' },
     '/admin/notices': { title: '管理员功能 - 系统通知栏', sub: '发布、查看与维护管理员系统通知' },
   };
 
@@ -54,7 +55,7 @@ export default function MainLayout() {
   };
 
   const handleProfileClick = () => {
-    navigate(isAdmin ? '/admin/users' : '/files');
+    navigate(isAdmin ? '/admin/system-info' : '/files');
   };
 
   const fetchUnreadNoticeCount = useCallback(async () => {
@@ -106,6 +107,7 @@ export default function MainLayout() {
   ];
 
   const adminMenuChildren = [
+    { key: '/admin/system-info', icon: <CloudServerOutlined />, label: '系统信息' },
     { key: '/notices', icon: <BellOutlined />, label: noticeMenuLabel },
     { key: '/admin/users', icon: <SettingOutlined />, label: '用户管理' },
     { key: '/admin/notices', icon: <BellOutlined />, label: '系统通知栏' },
